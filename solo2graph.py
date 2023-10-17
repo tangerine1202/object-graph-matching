@@ -4,6 +4,7 @@ import copy
 from glob import glob
 from pprint import pprint
 import pickle as pkl
+import shutil
 
 from joblib import Parallel, delayed
 from tqdm.auto import tqdm
@@ -27,7 +28,6 @@ visual_encoder = resnet50(weights=ResNet50_Weights.DEFAULT).eval().to(device)
 
 def frame_to_data(f, solo, k=5, bidirectional=False):
     seq_path = f.sequence_path
-    step = f.step
     cap = f.captures[0]
     metrics = f.metrics
     anno_defs = solo.annotation_definitions
@@ -218,6 +218,8 @@ def pair_graph(g1, g2):
         'g2_camera_pose': g2['camera_pose'],
         'g1_camera_intrinsics': g1['camera_intrinsics'],
         'g2_camera_intrinsics': g2['camera_intrinsics'],
+        'g1_step': g1['step'],
+        'g2_step': g2['step'],
     }
 
 
@@ -226,10 +228,14 @@ if __name__ == '__main__':
     DATA_PATH = f'../output/SimpleOffice/{SOLO_NAME}'
     SINGLE_GRAPH_PATH = f'../output/SimpleOffice/{SOLO_NAME}/single_graph'
     PAIRED_GRAPH_PATH = f'../output/SimpleOffice/{SOLO_NAME}/paired_graph'
-    if not os.path.exists(SINGLE_GRAPH_PATH):
-        os.mkdir(SINGLE_GRAPH_PATH)
-    if not os.path.exists(PAIRED_GRAPH_PATH):
-        os.mkdir(PAIRED_GRAPH_PATH)
+    if os.path.exists(SINGLE_GRAPH_PATH):
+        print(f'remove {SINGLE_GRAPH_PATH}')
+        shutil.rmtree(SINGLE_GRAPH_PATH)
+    os.mkdir(SINGLE_GRAPH_PATH)
+    if os.path.exists(PAIRED_GRAPH_PATH):
+        print(f'remove {PAIRED_GRAPH_PATH}')
+        shutil.rmtree(PAIRED_GRAPH_PATH)
+    os.mkdir(PAIRED_GRAPH_PATH)
 
     solo = Solo(DATA_PATH)
     k = 5
@@ -257,10 +263,9 @@ if __name__ == '__main__':
             overlap_count, g = pair_graph(g1, g2)
             num_edges = len(g['edge_df'])
             if overlap_count < 1 or num_edges < 1:
-                # print(fname1, fname2, overlap_count)
                 continue
             if overlap_count < 4:
-                # no enough matching for p3p
                 continue
+                # no enough matching for p3p
 
             pkl.dump(g, open(frame_path, 'wb'))

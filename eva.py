@@ -14,10 +14,10 @@ def compute_eval(pred_dict, data_dict):
     metrics['f1'] = conf_matrix['f1']
 
     # hits@k
-    all_k = [1, 3, 5]
-    for k in all_k:
-        correct, total = compute_hits_k(pred_dict, data_dict, k)
-        metrics[f'hits@{k}'] = correct / total
+    # all_k = [1, 3, 5]
+    # for k in all_k:
+    #     correct, total = compute_hits_k(pred_dict, data_dict, k)
+    #     metrics[f'hits@{k}'] = correct / total
 
     # translation error
     if 'pose0' in pred_dict and 'pose1' in pred_dict:

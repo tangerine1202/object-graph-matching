@@ -65,7 +65,8 @@ def transform_data(data, labels):
     data['node_df'] = data['node_df'].drop(columns=unwanted_cols)
 
     # FIXME: normalize bbox size
-    data['node_df'][['bbox_cx', 'bbox_cy', 'bbox_h', 'bbox_w']] /= 320
+    if 'bbox' in data.keys():
+        data['bbox'][['bbox_cx', 'bbox_cy', 'bbox_h', 'bbox_w']] /= 320
     data['edge_df']['bbox_dist'] /= 320 * np.sqrt(2)
 
     # FIXME: fix edge data type

@@ -28,12 +28,16 @@ class CustomCriterion(torch.nn.Module):
 
 class SuperGlueCriterion(torch.nn.Module):
     # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
+    # ref: https://github.com/yingxin-jia/SuperGlue-pytorch/blob/e8a9edf44034b78bbbe79320fff44087701c8d68/models/superglue.py#L290
     def __init__(self):
         super(SuperGlueCriterion, self).__init__()
 
     def forward(self, pred_dict, data_dict):
         all_matches = torch.concat([data_dict['e1i'], data_dict['e2i'] -
                                    data_dict['g1_node_count'].item()], dim=0).transpose(0, 1).unsqueeze(0)
+        # NOTE: this is different than the SuperGlue paper, which uses all points
+        unmatched0 = torch.tensor([i for i in range(data_dict['g1_node_count'].item()) if i not in data_dict['e1i']])
+        unmatched1 = torch.tensor([i for i in range(data_dict['g2_node_count'].item()) if i not in data_dict['e2i']-data_dict['g1_node_count'].item()])
         scores = pred_dict['scores']
 
         # check if indexed correctly
@@ -42,10 +46,10 @@ class SuperGlueCriterion(torch.nn.Module):
             x = all_matches[0][i][0]
             y = all_matches[0][i][1]
             loss.append(-torch.log(scores[0][x][y].exp()))  # check batch size == 1 ?
-        # for p0 in unmatched0:
-        #     loss += -torch.log(scores[0][p0][-1])
-        # for p1 in unmatched1:
-        #     loss += -torch.log(scores[0][-1][p1])
+        for p0 in unmatched0:
+            loss.append(-torch.log(scores[0][p0][-1].exp()))
+        for p1 in unmatched1:
+            loss.append(-torch.log(scores[0][-1][p1].exp()))
         loss_mean = torch.mean(torch.stack(loss))
         loss_mean = torch.reshape(loss_mean, (1, -1))
         # FIXME: check if only the loss is used in backprop
