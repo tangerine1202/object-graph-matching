@@ -1,8 +1,13 @@
-.DS_Store
-.ipynb_checkpoints/
+__pycache__/
 .vscode/
+.ipynb_checkpoints/
 iframe_figures/
 
+# macOS
+.DS_Store
+__MACOSX/
+
 venv/
+data/
 
 seg_match.zip

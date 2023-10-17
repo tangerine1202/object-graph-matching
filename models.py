@@ -8,8 +8,11 @@ import torch
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
 
-device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-device = 'cpu'
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+    device = torch.device('cpu')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
 print(f'torch device: {device}')
 
 

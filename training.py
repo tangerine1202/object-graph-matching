@@ -17,8 +17,11 @@ from torch.utils.data import Dataset
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
-device = 'cpu'
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+    device = torch.device('cpu')
+elif torch.cuda.is_available():
+    device = torch.device('cuda')
 print(f'torch device: {device}')
 
 # GNN package
@@ -27,10 +30,12 @@ from torch_geometric.data import Data, Dataset, InMemoryDataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.nn import GCNConv, GATv2Conv
 
-labels = ['chair', 'window', 'door', 'desk', 'potted plant', 'street sign', 'tv', 'dining table', 'couch', 'sink', 'monitor', 'floor', 'wall', 'ceiling', 'fire hydrant']
+labels = ['chair', 'window', 'door', 'desk', 'potted plant', 'street sign', 'tv',
+          'dining table', 'couch', 'sink', 'monitor', 'floor', 'wall', 'ceiling', 'fire hydrant']
 label2idx = {label: i for i, label in enumerate(labels)}
 
 # ----- dataset ------
+
 
 class CustomDataset(Dataset):
     def __init__(self, root, transform=None):
@@ -40,7 +45,7 @@ class CustomDataset(Dataset):
 
     def len(self): pass
     def get(self, idx): pass
-    
+
     def __len__(self):
         return len(self.file_names)
 
@@ -52,6 +57,7 @@ class CustomDataset(Dataset):
             data = self.transform(data)
 
         return data
+
 
 def transform_data(data):
     data['node_df']['label_idx'] = data['node_df']['label_name'].apply(lambda x: label2idx[x])
@@ -68,7 +74,8 @@ def transform_data(data):
     graph = Data(
         x=torch.tensor(data['node_df'].values, dtype=torch.float),
         edge_index=torch.tensor(data['edge_df'][['node_id_src', 'node_id_dst']].values.T, dtype=torch.long),
-        edge_attr=torch.tensor(data['edge_df'][[col for col in data['edge_df'].columns if col not in ['node_id_src', 'node_id_dst']]].values, dtype=torch.float),
+        edge_attr=torch.tensor(data['edge_df'][[col for col in data['edge_df'].columns if col not in [
+                               'node_id_src', 'node_id_dst']]].values, dtype=torch.float),
     )
     data['graph'] = graph
 
@@ -84,33 +91,34 @@ def transform_data(data):
 
 # ----- model -----
 class CustomModel(nn.Module):
-  def __init__(self, in_channels, edge_attr_channels, hidden_channels, out_channels, num_layers=2):
-    super(CustomModel, self).__init__()
-    self.norm = nn.InstanceNorm1d(in_channels)
-    self.lin1 = nn.Linear(in_channels, hidden_channels)
-    # self.edge_lin1 = nn.Linear(edge_attr_channels, hidden_channels)
-    self.gat1 = GATv2Conv(hidden_channels, hidden_channels, edge_dim=edge_attr_channels)
-    # self.gats = nn.ModuleList()
-    # for i in range(num_layers - 2):
-    #   self.gats.append(GATv2Conv(hidden_channels, hidden_channels))
-    self.gat2 = GATv2Conv(hidden_channels, out_channels, edge_dim=edge_attr_channels)
+    def __init__(self, in_channels, edge_attr_channels, hidden_channels, out_channels, num_layers=2):
+        super(CustomModel, self).__init__()
+        self.norm = nn.InstanceNorm1d(in_channels)
+        self.lin1 = nn.Linear(in_channels, hidden_channels)
+        # self.edge_lin1 = nn.Linear(edge_attr_channels, hidden_channels)
+        self.gat1 = GATv2Conv(hidden_channels, hidden_channels, edge_dim=edge_attr_channels)
+        # self.gats = nn.ModuleList()
+        # for i in range(num_layers - 2):
+        #   self.gats.append(GATv2Conv(hidden_channels, hidden_channels))
+        self.gat2 = GATv2Conv(hidden_channels, out_channels, edge_dim=edge_attr_channels)
 
-  def forward(self, x, edge_index, edge_attr):
-    # edge_attr = ((edge_attr - edge_attr.mean()) / edge_attr.std())
-    # edge_attr = edge_attr.unsqueeze(1)
-    # edge_attr = self.edge_lin1(edge_attr)
-    # edge_attr = edge_attr.squeeze(1)
-    
-    x = self.norm(x)
-    x = self.lin1(x)
-    x = x.relu()
-    x = self.gat1(x, edge_index, edge_attr)
-    x = x.relu()
-    # for gat in self.gats:
-    #   x = gat(x, edge_index, edge_attr)
-    #   x = x.relu()
-    x = self.gat2(x, edge_index, edge_attr)
-    return x
+    def forward(self, x, edge_index, edge_attr):
+        # edge_attr = ((edge_attr - edge_attr.mean()) / edge_attr.std())
+        # edge_attr = edge_attr.unsqueeze(1)
+        # edge_attr = self.edge_lin1(edge_attr)
+        # edge_attr = edge_attr.squeeze(1)
+
+        x = self.norm(x)
+        x = self.lin1(x)
+        x = x.relu()
+        x = self.gat1(x, edge_index, edge_attr)
+        x = x.relu()
+        # for gat in self.gats:
+        #   x = gat(x, edge_index, edge_attr)
+        #   x = x.relu()
+        x = self.gat2(x, edge_index, edge_attr)
+        return x
+
 
 def train_step(model, data_dict, optimizer, icl_loss_fn):
     graph = data_dict['graph']
@@ -145,12 +153,12 @@ def calculate_prob_dist(e1i, e2i, e1j, e2j, temp):
 
 
 class ICLLoss(nn.Module):
-    def __init__(self, device, temperature=0.1, alpha = 0.5):
+    def __init__(self, device, temperature=0.1, alpha=0.5):
         super(ICLLoss, self).__init__()
-        self.temp = 0.1 #temperature
+        self.temp = 0.1  # temperature
         self.alpha = alpha
         self.device = device
-    
+
     def forward(self, emb, data_dict):
         emb = F.normalize(emb, dim=1)
         e1i = emb[data_dict['e1i']]
@@ -164,11 +172,13 @@ class ICLLoss(nn.Module):
         lossA = qm_e1i_e2i
         lossB = qm_e2i_e1i
 
-        loss = self.alpha * lossA + (1-self.alpha) * lossB
+        loss = self.alpha * lossA + (1 - self.alpha) * lossB
         loss = -torch.log(loss).mean()
         return loss
 
 # ----- evaluation -----
+
+
 def compute_hits_k(rank_list, e1i_idxs, e2i_idxs, k=1):
     rank_list = rank_list.detach().cpu().numpy()
     correct, total = 0, 0
@@ -177,11 +187,13 @@ def compute_hits_k(rank_list, e1i_idxs, e2i_idxs, k=1):
         e1_idx_rank_list.remove(e1i_idx)
         e1_idx_rank_list_k = e1_idx_rank_list[:k]
 
-        if e2i_idxs[idx] in e1_idx_rank_list_k: correct += 1
-    
+        if e2i_idxs[idx] in e1_idx_rank_list_k:
+            correct += 1
+
     total = e1i_idxs.shape[0]
 
     return correct, total
+
 
 def compute_eval(emb, data_dict):
     e1i = data_dict['e1i']
@@ -191,8 +203,8 @@ def compute_eval(emb, data_dict):
     e2i = e2i.squeeze(0)
 
     emb = emb / emb.norm(dim=1)[:, None]
-    dist = 1 - torch.mm(emb, emb.transpose(0,1))
-    rank_list = torch.argsort(dist, dim = 1)
+    dist = 1 - torch.mm(emb, emb.transpose(0, 1))
+    rank_list = torch.argsort(dist, dim=1)
 
     metrics = {}
     all_k = [1, 2, 3, 4, 5]
@@ -201,8 +213,9 @@ def compute_eval(emb, data_dict):
         metrics[f'hits@{k}'] = correct / total
     return metrics
 
+
 if __name__ == '__main__':
-    SOLO_NAME =  'Rarea_poisson3'
+    SOLO_NAME = 'Rarea_poisson3'
     DATA_DIR = f'./data/{SOLO_NAME}/pair'
 
     num_node_features = 15
@@ -211,7 +224,6 @@ if __name__ == '__main__':
     # print('num edges:', graph.num_edges)
     print('num node features:', num_node_features)
     print('num edge features:', num_edge_features)
-
 
     ds = CustomDataset(root=DATA_DIR, transform=transform_data)
     train_ds, eval_ds, test_ds = torch.utils.data.random_split(ds, [0.5, 0.2, 0.3])
@@ -224,7 +236,6 @@ if __name__ == '__main__':
     print('train size:', len(train_ds))
     print('eval size:', len(eval_ds))
     print('test size:', len(test_ds))
-
 
     temp = 0.1
     lr = 5e-4
@@ -261,9 +272,9 @@ if __name__ == '__main__':
 
                 metrics = compute_eval(emb, data_dict)
                 for k, v in metrics.items():
-                    if k not in eval_metrics: eval_metrics[k] = []
+                    if k not in eval_metrics:
+                        eval_metrics[k] = []
                     eval_metrics[k].append(v)
         print(f'eval loss: {np.mean(eval_losses)}')
         for k, v in eval_metrics.items():
             print(f'{k}: {np.mean(v):.4f}')
-

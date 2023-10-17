@@ -1,14 +1,15 @@
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Data, Dataset, InMemoryDataset
-import torchvision.transforms.functional as VF
-from torch.utils.data import Dataset
-import torch
-import pandas as pd
-import numpy as np
-import glob
-import pickle as pkl
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+import glob
+import pickle as pkl
+
+import numpy as np
+import pandas as pd
+import torch
+import torchvision.transforms.functional as VF
+from torch.utils.data import Dataset
+from torch_geometric.loader import DataLoader
+from torch_geometric.data import Data, Dataset, InMemoryDataset
 
 
 class CustomDataset(Dataset):
@@ -86,6 +87,7 @@ def transform_data(data, labels):
             data[k] = torch.from_numpy(v)
         elif type(v) == list:
             data[k] = torch.tensor(v)
+
     # data['e1i'] = torch.from_numpy(np.asarray(data['e1i'], dtype=int))
     # data['e2i'] = torch.from_numpy(np.asarray(data['e2i'], dtype=int))
     # data['e1j'] = torch.from_numpy(np.asarray(data['e1j'], dtype=int))
