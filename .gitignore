@@ -1,11 +1,11 @@
-__pycache__/
+**/__pycache__/
 .vscode/
 .ipynb_checkpoints/
 iframe_figures/
 
 # macOS
 .DS_Store
-__MACOSX/
+**/__MACOSX/
 
 venv/
 data/
