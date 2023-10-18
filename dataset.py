@@ -13,12 +13,11 @@ from torch_geometric.data import Data, Dataset, InMemoryDataset
 
 
 class CustomDataset(Dataset):
-    def __init__(self, root, scene, transform=None):
+    def __init__(self, root, scene, transform=None, ):
         self.root = root
-        self.graph_dir = 'paired_graph'
         self.img_dir = 'sequence.0'
         self.file_names = sorted([os.path.basename(name)
-                                 for name in glob.glob(os.path.join(root, self.graph_dir, '*.pkl'))])
+                                 for name in glob.glob(os.path.join(root, '*.pkl'))])
         self.transform = transform
 
         self.scene = scene
@@ -38,7 +37,7 @@ class CustomDataset(Dataset):
         return len(self.file_names)
 
     def __getitem__(self, idx):
-        data_path = os.path.join(self.root, self.graph_dir, self.file_names[idx])
+        data_path = os.path.join(self.root, self.file_names[idx])
         data = pkl.load(open(data_path, 'rb'))
 
         if self.transform:
