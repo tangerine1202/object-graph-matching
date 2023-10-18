@@ -224,10 +224,14 @@ def pair_graph(g1, g2):
 
 
 if __name__ == '__main__':
-    SOLO_NAME = 'poisson3r8_vis'
-    DATA_PATH = f'../output/SimpleOffice/{SOLO_NAME}'
-    SINGLE_GRAPH_PATH = f'../output/SimpleOffice/{SOLO_NAME}/single_graph'
-    PAIRED_GRAPH_PATH = f'../output/SimpleOffice/{SOLO_NAME}/paired_graph'
+    # SOLO_NAME = 'poisson3r8_vis'
+    # SCENE = 'SimpleOffice'
+    SCENE = 'WP16'
+    SOLO_NAME = 'D_pois3r8'
+    DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
+
+    SINGLE_GRAPH_PATH = f'{DATA_DIR}/single_graph'
+    PAIRED_GRAPH_PATH = f'{DATA_DIR}/paired_graph'
     if os.path.exists(SINGLE_GRAPH_PATH):
         print(f'remove {SINGLE_GRAPH_PATH}')
         shutil.rmtree(SINGLE_GRAPH_PATH)
@@ -237,7 +241,7 @@ if __name__ == '__main__':
         shutil.rmtree(PAIRED_GRAPH_PATH)
     os.mkdir(PAIRED_GRAPH_PATH)
 
-    solo = Solo(DATA_PATH)
+    solo = Solo(DATA_DIR)
     k = 5
     bidirectional = False
 
