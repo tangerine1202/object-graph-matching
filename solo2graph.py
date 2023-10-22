@@ -1,12 +1,12 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+import argparse
 import copy
 from glob import glob
 from pprint import pprint
 import pickle as pkl
 import shutil
 
-from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
 import numpy as np
@@ -19,7 +19,12 @@ from torchvision.models import resnet50, ResNet50_Weights
 from solo_tool import Solo
 
 
-device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
+if torch.cuda.is_available():
+    device = 'cuda'
+elif torch.backends.mps.is_available():
+    device = 'mps'
+else:
+    device = 'cpu'
 
 
 visual_preprocess = ResNet50_Weights.DEFAULT.transforms(antialias=True)
@@ -27,7 +32,8 @@ visual_encoder = resnet50(weights=ResNet50_Weights.DEFAULT).eval().to(device)
 
 
 def frame_to_data(f, solo, k=5, bidirectional=False):
-    seq_path = f.sequence_path
+    data_path = solo.output_path
+    step = f.step
     cap = f.captures[0]
     metrics = f.metrics
     anno_defs = solo.annotation_definitions
@@ -35,7 +41,6 @@ def frame_to_data(f, solo, k=5, bidirectional=False):
     data_dict = {}
 
     inst = annos['instance segmentation']
-    inst.create_masks(seq_path)
     inst_df = inst.instances_df
 
     bbox = annos['bounding box']
@@ -80,7 +85,7 @@ def frame_to_data(f, solo, k=5, bidirectional=False):
 
     # extract visual features
     bbox_embs = []
-    rgb_path = f'{seq_path}/{cap.filename}'
+    rgb_path = f'{data_path}/rgb/step{step}.png'
     rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
     rgb_img = VF.to_tensor(rgb_img)
     for i, row in obj_df.iterrows():
@@ -224,52 +229,68 @@ def pair_graph(g1, g2):
 
 
 if __name__ == '__main__':
-    # SOLO_NAME = 'poisson3r8_vis'
-    # SCENE = 'SimpleOffice'
-    SCENE = 'WP16'
-    SOLO_NAME = 'D_pois3r8'
-    DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--path',
+                        type=str,
+                        help='path to solo output',
+                        required=True)
+    parser.add_argument('--reorganized',
+                        action='store_true',
+                        help='whether the data has been reorganized')
+    parser.add_argument('--move',
+                        action='store_true',
+                        help='move files instead of copying')
+    parser.add_argument('--output_dir',
+                        type=str,
+                        default='data',
+                        help='name of the reorganized output directory')
+    parser.add_argument('--single_graph_dir',
+                        type=str,
+                        default='graph',
+                        help='name of the single graph directory')
+    args = parser.parse_args()
 
-    SINGLE_GRAPH_PATH = f'{DATA_DIR}/single_graph'
-    PAIRED_GRAPH_PATH = f'{DATA_DIR}/paired_graph'
+    SINGLE_GRAPH_PATH = os.path.join(args.path, args.single_graph_dir)
+    # PAIRED_GRAPH_PATH = f'{DATA_DIR}/paired_graph'
+
     if os.path.exists(SINGLE_GRAPH_PATH):
         print(f'remove {SINGLE_GRAPH_PATH}')
         shutil.rmtree(SINGLE_GRAPH_PATH)
     os.mkdir(SINGLE_GRAPH_PATH)
-    if os.path.exists(PAIRED_GRAPH_PATH):
-        print(f'remove {PAIRED_GRAPH_PATH}')
-        shutil.rmtree(PAIRED_GRAPH_PATH)
-    os.mkdir(PAIRED_GRAPH_PATH)
+    # if os.path.exists(PAIRED_GRAPH_PATH):
+    #     print(f'remove {PAIRED_GRAPH_PATH}')
+    #     shutil.rmtree(PAIRED_GRAPH_PATH)
+    # os.mkdir(PAIRED_GRAPH_PATH)
 
-    solo = Solo(DATA_DIR)
+    solo = Solo(args.path, args.output_dir, is_reorganized=args.reorganized, move=args.move)
     k = 5
     bidirectional = False
 
     for f in tqdm(solo.frames()):
         valid, data_dict = frame_to_data(f, solo, k, bidirectional)
         if not valid:
-            print(f'frame {f.frame} is invalid')
+            print(f'step {f.step} is invalid')
             continue
-        frame_path = os.path.join(SINGLE_GRAPH_PATH, f'{f.frame}.pkl')
+        frame_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
         pkl.dump(data_dict, open(frame_path, 'wb'))
 
-    paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
-    for p1 in tqdm(paths):
-        for p2 in paths:
-            if p1 == p2:
-                continue
-            g1 = pkl.load(open(p1, 'rb'))
-            g2 = pkl.load(open(p2, 'rb'))
-            fname1 = os.path.basename(p1).split('.')[0]
-            fname2 = os.path.basename(p2).split('.')[0]
-            frame_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
+    # paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
+    # for p1 in tqdm(paths):
+    #     for p2 in paths:
+    #         if p1 == p2:
+    #             continue
+    #         g1 = pkl.load(open(p1, 'rb'))
+    #         g2 = pkl.load(open(p2, 'rb'))
+    #         fname1 = os.path.basename(p1).split('.')[0]
+    #         fname2 = os.path.basename(p2).split('.')[0]
+    #         frame_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
 
-            overlap_count, g = pair_graph(g1, g2)
-            num_edges = len(g['edge_df'])
-            if overlap_count < 1 or num_edges < 1:
-                continue
-            if overlap_count < 4:
-                continue
-                # no enough matching for p3p
+    #         overlap_count, g = pair_graph(g1, g2)
+    #         num_edges = len(g['edge_df'])
+    #         if overlap_count < 1 or num_edges < 1:
+    #             continue
+    #         if overlap_count < 4:
+    #             continue
+    #             # no enough matching for p3p
 
-            pkl.dump(g, open(frame_path, 'wb'))
+    #         pkl.dump(g, open(frame_path, 'wb'))
