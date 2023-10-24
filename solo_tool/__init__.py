@@ -10,7 +10,12 @@ import pandas as pd
 import cv2
 
 from .capture import Capture
-from .annotation_definition import AnnotationDefinition, InstanceSegmentationAnnotationDefinition, BoundingBox2DAnnotationDefinition
+from .annotation_definition import (
+    AnnotationDefinition,
+    InstanceSegmentationAnnotationDefinition,
+    BoundingBox2DAnnotationDefinition,
+    BoundingBox3DAnnotationDefinition
+)
 from .metric import Metric, GenericMetric
 
 
@@ -82,6 +87,8 @@ class Solo():
                 return InstanceSegmentationAnnotationDefinition(annotation_def)
             elif annotation_def_id == 'bounding box':
                 return BoundingBox2DAnnotationDefinition(annotation_def)
+            elif annotation_def_id == 'bounding box 3D':
+                return BoundingBox3DAnnotationDefinition(annotation_def)
             else:
                 raise NotImplementedError
         except NotImplementedError:

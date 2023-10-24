@@ -6,8 +6,9 @@ from .annotation import (
     Annotation,
     SemanticSegmentationAnnotation,
     InstanceSegmentationAnnotation,
-    BoundingBox2DAnnotation,
     DepthAnnotation,
+    BoundingBox2DAnnotation,
+    BoundingBox3DAnnotation,
 )
 
 
@@ -39,10 +40,12 @@ class Capture():
                 return SemanticSegmentationAnnotation(annotation, self.root)
             elif annotation_id == 'instance segmentation':
                 return InstanceSegmentationAnnotation(annotation, self.root)
-            elif annotation_id == 'bounding box':
-                return BoundingBox2DAnnotation(annotation)
             elif annotation_id == 'Depth':
                 return DepthAnnotation(annotation)
+            elif annotation_id == 'bounding box':
+                return BoundingBox2DAnnotation(annotation)
+            elif annotation_id == 'bounding box 3D':
+                return BoundingBox3DAnnotation(annotation)
             else:
                 raise NotImplementedError
         except NotImplementedError:

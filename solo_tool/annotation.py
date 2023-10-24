@@ -152,3 +152,28 @@ class BoundingBox2DAnnotation(Annotation):
         values_df = values_df.drop(['origin', 'dimension'], axis=1)
         values_df = pd.concat([values_df, x0y0, wh, cxcy], axis=1)
         return values_df
+
+
+class BoundingBox3DAnnotation(Annotation):
+    def __init__(self, annotation):
+        super().__init__(annotation)
+        self.has_instance = 'values' in self.annotation.keys()
+        self._values = self.annotation['values'] if self.has_instance else []
+        self._values_df = self._prepare_values_df_(self._values) if self.has_instance else pd.DataFrame()
+
+    @property
+    def values(self):
+        return self._values.copy()
+
+    @property
+    def values_df(self):
+        return self._values_df.copy()
+
+    def _prepare_values_df_(self, values):
+        values_df = pd.DataFrame(values)
+        t_xyz = values_df['translation'].apply(pd.Series).rename(columns={0: 'tx', 1: 'ty', 2: 'tz'})
+        q_xyzw = values_df['rotation'].apply(pd.Series).rename(columns={0: 'qx', 1: 'qy', 2: 'qz', 3: 'qw'})
+        size_xyz = values_df['size'].apply(pd.Series).rename(columns={0: 'sx', 1: 'sy', 2: 'sz'})
+        values_df = values_df.drop(['translation', 'rotation', 'size'], axis=1)
+        values_df = pd.concat([values_df, t_xyz, q_xyzw, size_xyz], axis=1)
+        return values_df
