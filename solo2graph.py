@@ -12,9 +12,12 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import cv2
+from PIL import Image
 import torch
-import torchvision.transforms.functional as VF
-from torchvision.models import resnet50, ResNet50_Weights
+# import torchvision.transforms.functional as VF
+# from torchvision.models import resnet50, ResNet50_Weights
+
+from lavis.models import load_model_and_preprocess
 
 from solo_tool import Solo
 
@@ -27,205 +30,271 @@ else:
     device = 'cpu'
 
 
-visual_preprocess = ResNet50_Weights.DEFAULT.transforms(antialias=True)
-visual_encoder = resnet50(weights=ResNet50_Weights.DEFAULT).eval().to(device)
+def extract_features(raw_image, text):
+    """
+    LAVIS Unified Feature Extraction Interface
 
+    The multimodal feature can be used for multimodal classification.
+    The low-dimensional unimodal features can be used to compute cross-modal similarity.
 
-def frame_to_data(f, solo, k=5, bidirectional=False):
-    data_path = solo.output_path
-    step = f.step
-    cap = f.captures[0]
-    metrics = f.metrics
-    anno_defs = solo.annotation_definitions
-    annos = cap.annotations
-    data_dict = {}
+    ref: https://github.com/salesforce/LAVIS#unified-feature-extraction-interface
+    """
+    if isinstance(raw_image, np.ndarray):
+        raw_image = Image.fromarray(raw_image)
+    image = vis_processors["eval"](raw_image).unsqueeze(0).to(device)
+    text_input = txt_processors["eval"](text)
+    sample = {"image": image, "text_input": [text_input]}
 
-    inst = annos['instance segmentation']
-    inst_df = inst.instances_df
+    features_multimodal = model.extract_features(sample)  # torch.Size([1, 32, 768]), 32 is the number of queries
 
-    bbox = annos['bounding box']
-    bbox_df = bbox.values_df
+    features_image = model.extract_features(sample, mode="image")  # torch.Size([1, 32, 768])
+    features_text = model.extract_features(sample, mode="text")  # torch.Size([1, words, 768])
 
-    meta = metrics['metadata']
-    env_meta = meta.env_metadata
-    meta_df = meta.instances_df
+    # multimodal feature
+    # use features_multimodal[:,0,:] for multimodal classification tasks
+    feat_multimodal = features_multimodal.multimodal_embeds[:, 0, :].cpu().numpy()
 
-    # prepare object dataframe
-    obj_df = meta_df.copy()
-    # filter invisible objects
-    if not inst.has_instance:
-        return False, None
-    obj_df = obj_df[obj_df['instanceId'].isin(inst_df['instanceId'])]  # filter out invisible objects
-    # rename columns
-    obj_df = obj_df.rename(columns={'object_labelName': 'label_name'})
-    # add columns
-    obj_df['label_id'] = obj_df['label_name'].apply(lambda x: anno_defs['bounding box'].name2id[x])
-    pos_df = obj_df['object_absPos'].apply(pd.Series).rename(columns={0: 'pos_x', 1: 'pos_y', 2: 'pos_z'})
-    obj_df = pd.concat((obj_df, pos_df), axis=1).drop(columns=['object_absPos'])
-    # merge annotations
-    bbox_df_for_merge = bbox_df.copy() \
-        .drop(columns=['labelName', 'labelId']) \
-        .add_prefix('bbox_') \
-        .rename(columns={'bbox_instanceId': 'instanceId'})
-    inst_df_for_merge = inst_df.copy() \
-        .drop(columns=['labelName', 'labelId', 'color']) \
-        .add_prefix('inst_') \
-        .rename(columns={'inst_instanceId': 'instanceId'})
-    obj_df = pd.merge(obj_df, bbox_df_for_merge, how='inner', left_on='instanceId',
-                      right_on='instanceId', suffixes=('', '_duplicated'))
-    obj_df = pd.merge(obj_df, inst_df_for_merge, how='inner', left_on='instanceId',
-                      right_on='instanceId', suffixes=('', '_duplicated'))
-    obj_df = obj_df.rename(columns={'instanceId': 'inst_id'})
+    # uni-modal features
+    feat_img = features_image.image_embeds[:, 0, :].cpu().numpy()
+    feat_txt = features_text.text_embeds[:, 0, :].cpu().numpy()
 
-    # filter out small object
-    mask = obj_df['bbox_w'] * obj_df['bbox_h'] > 500
-    obj_df = obj_df[mask].reset_index(drop=True)
-    if len(obj_df) <= 1:
-        return False, None
+    # normalized low-dimensional uni-modal features
+    # norm_img: torch.Size([1, 197, 256])
+    # norm_tex: torch.Size([1, words, 256])
+    feat_norm_img = features_image.image_embeds_proj[:, 0, :].cpu().numpy()
+    feat_norm_txt = features_text.text_embeds_proj[:, 0, :].cpu().numpy()
+    # similarity = (features_image.image_embeds_proj @ features_text.text_embeds_proj[:,0,:].t()).max()
+    # similarity = (features_image.image_embeds_proj[:,0,:] @ features_text.text_embeds_proj[:,0,:].t())
 
-    # extract visual features
-    bbox_embs = []
-    rgb_path = f'{data_path}/rgb/step{step}.png'
-    rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
-    rgb_img = VF.to_tensor(rgb_img)
-    for i, row in obj_df.iterrows():
-        top, left, w, h = int(row['bbox_y0']), int(row['bbox_x0']), int(row['bbox_w']), int(row['bbox_h'])
-        crop_img = rgb_img[:, top:top + h, left:left + w]
-        with torch.no_grad():
-            proc_crop_img = visual_preprocess(crop_img.to(device).unsqueeze(0))
-            bbox_emb = visual_encoder(proc_crop_img).squeeze().cpu().numpy()
-        bbox_embs.append(bbox_emb)
-    bbox_embs = np.stack(bbox_embs, axis=0)
-
-    with torch.no_grad():
-        proc_rgb_img = visual_preprocess(rgb_img.to(device).unsqueeze(0))
-        rgb_emb = visual_encoder(proc_rgb_img).squeeze().cpu().numpy()
-
-    graph_dict = obj_df_to_graph(obj_df, k=k, bidirectional=bidirectional)
-
-    data_dict = {
-        'step': f.step,
-        'camera_pose': cap.camera_pose,
-        'camera_intrinsics': cap.projectionMatrix,
-        'bbox_embs': bbox_embs,
-        'rgb_emb': rgb_emb,
-        'node_df': graph_dict['node_df'],
-        'edge_df': graph_dict['edge_df'],
-        'total_node_count': len(graph_dict['node_df']),
-        'total_edge_count': len(graph_dict['edge_df']),
-        'node2inst': graph_dict['node2inst'],
+    return {
+        'multimodal': feat_multimodal,
+        'image': feat_img,
+        'text': feat_txt,
+        'norm_image': feat_norm_img,
+        'norm_text': feat_norm_txt,
     }
 
-    return True, data_dict
+
+class Graph:
+    def __init__(self, f, solo, drop_no_instance=True):
+        valid, data = self.frame_to_data(f, solo)
+        self.valid = valid
+        self.data = data
+        if not valid and drop_no_instance:
+            self.data = None
+            return
+
+        self.step = self.data['step']
+        self.camera_pose = self.data['camera_pose']
+        self.camera_intrinsics = self.data['camera_intrinsics']
+
+        self.total_inst_cnt = self.data['total_obj_cnt']
+        self.inst_ids = self.data['inst_ids']
+        self.inst2node = self.data['inst2node']
+
+        self.node_ids = self.data['node_ids']
+        self.edge_index = self.data['edge_index']
+        self.node_feat = self.data['features']
+
+        self.node_attr = self.comp_node_attr()
+        self.edge_attr = self.comp_edge_attr()
+        # self.adj = self.edge_index2adj()
+
+    def __len__(self):
+        return len(self.node_ids)
+
+    def comp_node_attr(self):
+        attr = np.empty((len(self.node_ids), 0))
+        for feature in self.node_feat.values():
+            attr = np.concatenate((attr, feature), axis=1)
+        return attr
+
+    def comp_edge_attr(self):
+        cols = ['bbox_cx', 'bbox_cy']
+        node_df = pd.DataFrame({k: self.node_feat[k][:, 0] for k in cols})
+        node_df['node_id'] = self.node_ids
+        cross_df = node_df.merge(node_df, how='cross', suffixes=('_src', '_dst'))
+        # construct edge features
+        diff = cross_df[['bbox_cx_dst', 'bbox_cy_dst']].values - cross_df[['bbox_cx_src', 'bbox_cy_src']].values
+        cross_df['bbox_dist'] = np.linalg.norm(diff, axis=1)
+        theta = np.arctan2(diff[:, 1], diff[:, 0])
+        cross_df['bbox_sin'] = np.sin(theta)
+        cross_df['bbox_cos'] = np.cos(theta)
+        edge_attr = cross_df[['bbox_dist', 'bbox_sin', 'bbox_cos']]
+        # exclude diagonal edges
+        mask = np.eye(len(self.node_ids), dtype=bool).reshape(-1)
+        edge_attr = edge_attr[~mask].values
+        return edge_attr
+
+    def edge_index2adj(self):
+        adj = np.zeros((len(self.node_ids), len(self.node_ids)))
+        adj[self.edge_index[0], self.edge_index[1]] = 1
+        return adj
+
+    def frame_to_data(self, f, solo):
+        data_dict = {}
+        data_path = solo.output_path
+        step = f.step
+        cap = f.captures[0]
+        metrics = f.metrics
+        anno_defs = solo.annotation_definitions
+        annos = cap.annotations
+
+        inst = annos['instance segmentation']
+        inst_df = inst.instances_df
+
+        # FIXME: skip frames with no instance
+        if not inst.has_instance:
+            return False, None
+
+        bbox = annos['bounding box']
+        bbox_df = bbox.values_df
+
+        meta = metrics['metadata']
+        env_meta = meta.env_metadata
+        meta_df = meta.instances_df
+
+        # prepare object dataframe
+        obj_df = meta_df.copy()
+        # filter invisible objects
+        obj_df = obj_df[obj_df['instanceId'].isin(inst_df['instanceId'])]
+        # rename columns
+        obj_df = obj_df.rename(columns={'object_labelName': 'label_name'})
+        obj_df['label_id'] = obj_df['label_name'].apply(lambda x: anno_defs['bounding box'].name2id[x])
+
+        # add columns
+        pos_df = obj_df['object_absPos'].apply(pd.Series).rename(columns={0: 'pos_x', 1: 'pos_y', 2: 'pos_z'})
+        obj_df = pd.concat((obj_df, pos_df), axis=1).drop(columns=['object_absPos'])
+
+        # merge annotations
+        bbox_df_for_merge = bbox_df.copy() \
+            .drop(columns=['labelName', 'labelId']) \
+            .add_prefix('bbox_') \
+            .rename(columns={'bbox_instanceId': 'instanceId'})
+        inst_df_for_merge = inst_df.copy() \
+            .drop(columns=['labelName', 'labelId', 'color']) \
+            .add_prefix('inst_') \
+            .rename(columns={'inst_instanceId': 'instanceId'})
+        obj_df = pd.merge(obj_df, bbox_df_for_merge, how='inner', left_on='instanceId',
+                          right_on='instanceId', suffixes=('', '_duplicated'))
+        obj_df = pd.merge(obj_df, inst_df_for_merge, how='inner', left_on='instanceId',
+                          right_on='instanceId', suffixes=('', '_duplicated'))
+        obj_df = obj_df.rename(columns={'instanceId': 'inst_id'})
+
+        # filter out small object
+        # mask = obj_df['bbox_w'] * obj_df['bbox_h'] > 500
+        # obj_df = obj_df[mask]
+
+        obj_df = obj_df.reset_index(drop=True)
+
+        if len(obj_df) <= 1:
+            return False, None
+
+        # extract  features
+        bbox_embs = {}
+        rgb_path = f'{data_path}/rgb/step{step}.png'
+        rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
+        for _, obj in obj_df.iterrows():
+            top, left, w, h = int(obj['bbox_y0']), int(obj['bbox_x0']), int(obj['bbox_w']), int(obj['bbox_h'])
+            crop_img = rgb_img[top:top + h, left:left + w, :]
+            features = extract_features(crop_img, obj['label_name'])
+            for k, v in features.items():
+                if k not in bbox_embs:
+                    bbox_embs[k] = []
+                bbox_embs[k].append(v)
+        bbox_embs = {k: np.vstack(v) for k, v in bbox_embs.items()}
+
+        features = {
+            **{k: np.asarray(v).reshape(-1, 1) for k, v in obj_df.items()},
+            **{f'bbox_{k}': v for k, v in bbox_embs.items()}
+        }
+
+        node_ids = obj_df.index.to_list()
+        edge_index = np.array([[i, j] for i in node_ids for j in node_ids if i != j]).T
+        inst_ids = obj_df['inst_id'].to_list()
+        inst2node = {inst_id: node_id for node_id, inst_id in enumerate(inst_ids)}
+
+        data_dict = {
+            'node_ids': node_ids,
+            'edge_index': edge_index,
+            'inst_ids': inst_ids,
+            'inst2node': inst2node,
+            'features': features,
+            'total_obj_cnt': len(obj_df),
+            'step': f.step,
+            'camera_pose': cap.camera_pose,
+            'camera_intrinsics': cap.projectionMatrix,
+        }
+
+        return True, data_dict
 
 
-def obj_df_to_graph(obj_df, k=5, bidirectional=False):
-    node_df = obj_df.copy()
-    node_df = pd.concat([pd.Series(node_df.index, name='node_id'), node_df], axis=1)
-    edge_df = calc_edge_pair(node_df, k=k, bidirectional=bidirectional)
-    node2inst = node_df[['node_id', 'inst_id']].to_dict()['inst_id']
+class PairedGraph:
+    def __init__(self, g1, g2):
+        self.g1 = g1
+        self.g2 = g2
+        self.n1 = len(g1)
+        self.n2 = len(g2)
+        self.n = self.n1 + self.n2
 
-    data_dict = {
-        'node_df': node_df,
-        'edge_df': edge_df,
-        'node2inst': node2inst,
-    }
+        self.node_attr = np.concatenate([g1.node_attr, g2.node_attr], axis=0)
+        self.node_feat = {}
+        self.comp_node_feat()
+        # edge index
+        self.comp_inter_edge()
+        # self.adj = np.zeros((self.n, self.n))
+        # self.adj[:self.n1, :self.n1] = self.g1.adj
+        # self.adj[self.n1:, self.n1:] = self.g2.adj
+        # self.adj[self.n1:, :self.n1] = self.adj_g2tog1
+        # self.adj[:self.n1, self.n1:] = self.adj_g1tog2
+        # self.edge_index = self.adj2edge_index(self.adj)
+        self.edge_index = np.concatenate([self.g1.edge_index, self.g2.edge_index + self.n1], axis=1)
+        # edge attr
+        # self.edge_attr = self.comp_edge_attr()
+        self.edge_attr = np.concatenate([self.g1.edge_attr, self.g2.edge_attr], axis=0)
+        assert len(self.edge_attr) == len(self.edge_index[0])
 
-    return data_dict
+        self.comp_matching()
 
+    def comp_node_feat(self):
+        for name in self.g1.node_feat.keys():
+            self.node_feat[name] = np.concatenate([self.g1.node_feat[name], self.g2.node_feat[name]], axis=0)
 
-def calc_edge_pair(node_df, k=5, bidirectional=False):
-    if len(node_df) < 2:
-        return pd.DataFrame(columns=['node_id_src', 'node_id_dst', 'bbox_dist'])
-    if len(node_df) <= k:
-        k = len(node_df) - 1
+    def comp_edge_attr(self):
+        pass
 
-    # construct edge pair id
-    node_df_for_cross = node_df.copy()[['node_id', 'bbox_cx', 'bbox_cy']]
-    cross_df = node_df_for_cross.merge(node_df_for_cross, how='cross', suffixes=('_src', '_dst'))
-    # construct edge features
-    diff = cross_df[['bbox_cx_dst', 'bbox_cy_dst']].values - cross_df[['bbox_cx_src', 'bbox_cy_src']].values
-    cross_df['bbox_dist'] = np.linalg.norm(diff, axis=1)
-    theta = np.arctan2(diff[:, 1], diff[:, 0])
-    cross_df['bbox_sin'] = np.sin(theta)
-    cross_df['bbox_cos'] = np.cos(theta)
+    def comp_inter_edge(self):
+        # compute edge between g1 and g2
+        self.edge_g1tog2 = np.array([[g1_node_id, g2_node_id]
+                                    for g1_node_id in self.g1.node_ids for g2_node_id in self.g2.node_ids]).T
+        self.edge_g2tog1 = np.array([[g2_node_id, g1_node_id]
+                                    for g2_node_id in self.g2.node_ids for g1_node_id in self.g1.node_ids]).T
+        adj_g1tog2 = np.zeros((len(self.g1), len(self.g2)))
+        adj_g2tog1 = np.zeros((len(self.g2), len(self.g1)))
+        adj_g1tog2[self.edge_g1tog2[0], self.edge_g1tog2[1]] = 1
+        adj_g2tog1[self.edge_g2tog1[0], self.edge_g2tog1[1]] = 1
+        # self.adj_g1tog2 = adj_g1tog2
+        # self.adj_g2tog1 = adj_g2tog1
 
-    # bbox dist as edge weight
-    dist_pivot = cross_df.pivot(index='node_id_dst', columns='node_id_src', values='bbox_dist')
-    # find first 3 pair with minimum weight
-    knn_bbox_dist = dist_pivot.apply(lambda x: x.nsmallest(k + 1).index).T
-    edge_df = knn_bbox_dist.melt(id_vars=[0], value_vars=[i for i in range(1, k + 1)]
-                                 )[[0, 'value']].rename(columns={0: 'node_id_src', 'value': 'node_id_dst'})
+    def adj2edge_index(self, adj):
+        edge_index = []
+        for i in range(adj.shape[0]):
+            for j in range(adj.shape[1]):
+                if adj[i, j] == 1:
+                    edge_index.append([i, j])
+        edge_index = np.array(edge_index).T
+        return edge_index
 
-    # drop duplicated bi-directional edge
-    if bidirectional:
-        edge_df['small2large_id'] = edge_df.apply(lambda x: (x['node_id_src'], x['node_id_dst']) if (
-            x['node_id_src'] < x['node_id_dst']) else (x['node_id_dst'], x['node_id_src']), axis=1)
-        edge_df = edge_df.drop_duplicates(subset=['small2large_id'])
-        edge_df = edge_df.drop(columns=['small2large_id'])
+    def comp_matching(self):
+        self.all_inst_ids = list(set(self.g1.inst_ids) | set(self.g2.inst_ids))
+        self.anchor_inst_ids = list(set(self.g1.inst_ids) & set(self.g2.inst_ids))
+        self.e1i = [g1.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
+        self.e1j = [g1.inst2node[inst_id] for inst_id in self.g1.inst_ids if inst_id not in self.anchor_inst_ids]
+        self.e2i = [g2.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
+        self.e2j = [g2.inst2node[inst_id] for inst_id in self.g2.inst_ids if inst_id not in self.anchor_inst_ids]
 
-    edge_df = edge_df.merge(cross_df[['node_id_src', 'node_id_dst', 'bbox_dist', 'bbox_sin', 'bbox_cos']], on=[
-                            'node_id_src', 'node_id_dst'], how='inner')
-
-    return edge_df
-
-
-def pair_graph(g1, g2):
-    g1 = copy.deepcopy(g1)
-    g2 = copy.deepcopy(g2)
-    all_inst_ids = list(set(g1['node2inst'].values()) | set(g2['node2inst'].values()))
-    anchor_inst_ids = list(set(g1['node2inst'].values()) & set(g2['node2inst'].values()))
-
-    inst2g1node = {inst_id: node_id for node_id, inst_id in g1['node2inst'].items()}
-    inst2g2node = {inst_id: (node_id + g1['total_node_count']) for node_id, inst_id in g2['node2inst'].items()}
-
-    g1['node_df']['node_id'] = g1['node_df']['inst_id'].apply(lambda x: inst2g1node[x])
-    g2['node_df']['node_id'] = g2['node_df']['inst_id'].apply(lambda x: inst2g2node[x])
-    g1['edge_df']['node_id_src'] = g1['edge_df']['node_id_src'].apply(lambda x: inst2g1node[g1['node2inst'][x]])
-    g1['edge_df']['node_id_dst'] = g1['edge_df']['node_id_dst'].apply(lambda x: inst2g1node[g1['node2inst'][x]])
-    g2['edge_df']['node_id_src'] = g2['edge_df']['node_id_src'].apply(lambda x: inst2g2node[g2['node2inst'][x]])
-    g2['edge_df']['node_id_dst'] = g2['edge_df']['node_id_dst'].apply(lambda x: inst2g2node[g2['node2inst'][x]])
-    g_nodes = pd.concat([g1['node_df'], g2['node_df']], axis=0)
-    g_edges = pd.concat([g1['edge_df'], g2['edge_df']], axis=0)
-    g_bbox_embs = np.concatenate([g1['bbox_embs'], g2['bbox_embs']], axis=0)
-
-    e1i = [inst2g1node[inst_id] for inst_id in anchor_inst_ids]
-    e1j = [inst2g1node[inst_id] for inst_id in g1['node2inst'].values() if inst_id not in anchor_inst_ids]
-    e2i = [inst2g2node[inst_id] for inst_id in anchor_inst_ids]
-    e2j = [inst2g2node[inst_id] for inst_id in g2['node2inst'].values() if inst_id not in anchor_inst_ids]
-
-    assert np.all([g_nodes['inst_id'].iloc[idx1] == g_nodes['inst_id'].iloc[idx2] for idx1, idx2 in zip(e1i, e2i)])
-
-    total_node_count = g1['total_node_count'] + g2['total_node_count']
-    overlap_count = len(e1i)
-
-    return overlap_count, {
-        'node_df': g_nodes,
-        'edge_df': g_edges,
-        'bbox_embs': g_bbox_embs,
-        'g1_rgb_emb': g1['rgb_emb'],
-        'g2_rgb_emb': g2['rgb_emb'],
-        'e1i': e1i,
-        'e1j': e1j,
-        'e2i': e2i,
-        'e2j': e2j,
-        'e1i_count': len(e1i),
-        'e1j_count': len(e1j),
-        'e2i_count': len(e2i),
-        'e2j_count': len(e2j),
-        'total_obj_count': len(all_inst_ids),
-        'total_node_count': total_node_count,
-        'g1_node_count': g1['total_node_count'],
-        'g2_node_count': g2['total_node_count'],
-        'g1_edge_count': g1['total_edge_count'],
-        'g2_edge_count': g2['total_edge_count'],
-        'g1_camera_pose': g1['camera_pose'],
-        'g2_camera_pose': g2['camera_pose'],
-        'g1_camera_intrinsics': g1['camera_intrinsics'],
-        'g2_camera_intrinsics': g2['camera_intrinsics'],
-        'g1_step': g1['step'],
-        'g2_step': g2['step'],
-    }
+    def __len__(self):
+        return self.n
 
 
 if __name__ == '__main__':
@@ -248,49 +317,59 @@ if __name__ == '__main__':
                         type=str,
                         default='graph',
                         help='name of the single graph directory')
+    parser.add_argument('--keep_no_instance',
+                        action='store_true',
+                        help='skip frames with no instance')
+    parser.add_argument('--paired_graph_dir',
+                        type=str,
+                        default='paired_graph',
+                        help='name of the paired graph directory')
     args = parser.parse_args()
 
     SINGLE_GRAPH_PATH = os.path.join(args.path, args.single_graph_dir)
-    # PAIRED_GRAPH_PATH = f'{DATA_DIR}/paired_graph'
+    PAIRED_GRAPH_PATH = os.path.join(args.path, args.paired_graph_dir)
 
     if os.path.exists(SINGLE_GRAPH_PATH):
         print(f'remove {SINGLE_GRAPH_PATH}')
         shutil.rmtree(SINGLE_GRAPH_PATH)
     os.mkdir(SINGLE_GRAPH_PATH)
-    # if os.path.exists(PAIRED_GRAPH_PATH):
-    #     print(f'remove {PAIRED_GRAPH_PATH}')
-    #     shutil.rmtree(PAIRED_GRAPH_PATH)
-    # os.mkdir(PAIRED_GRAPH_PATH)
+
+    if os.path.exists(PAIRED_GRAPH_PATH):
+        print(f'remove {PAIRED_GRAPH_PATH}')
+        shutil.rmtree(PAIRED_GRAPH_PATH)
+    os.mkdir(PAIRED_GRAPH_PATH)
+
+    model, vis_processors, txt_processors = load_model_and_preprocess(
+        name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
 
     solo = Solo(args.path, args.output_dir, is_reorganized=args.reorganized, move=args.move)
-    k = 5
-    bidirectional = False
 
     for f in tqdm(solo.frames()):
-        valid, data_dict = frame_to_data(f, solo, k, bidirectional)
-        if not valid:
+        graph = Graph(f, solo, drop_no_instance=(not args.keep_no_instance))
+        if not graph.valid and not args.keep_no_instance:
             print(f'step {f.step} is invalid')
             continue
-        frame_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
-        pkl.dump(data_dict, open(frame_path, 'wb'))
+        graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
+        pkl.dump(graph, open(graph_path, 'wb'))
 
-    # paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
-    # for p1 in tqdm(paths):
-    #     for p2 in paths:
-    #         if p1 == p2:
-    #             continue
-    #         g1 = pkl.load(open(p1, 'rb'))
-    #         g2 = pkl.load(open(p2, 'rb'))
-    #         fname1 = os.path.basename(p1).split('.')[0]
-    #         fname2 = os.path.basename(p2).split('.')[0]
-    #         frame_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
+    paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
+    for p1 in tqdm(paths):
+        for p2 in paths:
+            if p1 == p2:
+                continue
+            g1 = pkl.load(open(p1, 'rb'))
+            g2 = pkl.load(open(p2, 'rb'))
+            fname1 = os.path.basename(p1).split('.')[0]
+            fname2 = os.path.basename(p2).split('.')[0]
+            paired_graph_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
 
-    #         overlap_count, g = pair_graph(g1, g2)
-    #         num_edges = len(g['edge_df'])
-    #         if overlap_count < 1 or num_edges < 1:
-    #             continue
-    #         if overlap_count < 4:
-    #             continue
-    #             # no enough matching for p3p
+            pg = PairedGraph(g1, g2)
+            num_overlap = len(pg.e1i)
+            num_edges = len(pg.edge_index.T)
+            if num_overlap < 1 or num_edges < 1:
+                continue
+            if num_overlap < 4:
+                continue
+                # no enough matching for p3p
 
-    #         pkl.dump(g, open(frame_path, 'wb'))
+            pkl.dump(pg, open(paired_graph_path, 'wb'))

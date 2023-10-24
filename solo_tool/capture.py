@@ -2,7 +2,13 @@ import warnings
 from pprint import pprint
 import numpy as np
 
-from .annotation import Annotation, SemanticSegmentationAnnotation, InstanceSegmentationAnnotation, BoundingBox2DAnnotation
+from .annotation import (
+    Annotation,
+    SemanticSegmentationAnnotation,
+    InstanceSegmentationAnnotation,
+    BoundingBox2DAnnotation,
+    DepthAnnotation,
+)
 
 
 class Capture():
@@ -35,6 +41,8 @@ class Capture():
                 return InstanceSegmentationAnnotation(annotation, self.root)
             elif annotation_id == 'bounding box':
                 return BoundingBox2DAnnotation(annotation)
+            elif annotation_id == 'Depth':
+                return DepthAnnotation(annotation)
             else:
                 raise NotImplementedError
         except NotImplementedError:

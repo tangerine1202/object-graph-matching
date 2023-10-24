@@ -47,7 +47,7 @@ def compute_eval(pred_dict, data_dict):
 def compute_hits_k(pred_dict, data_dict, k=1):
     scores = pred_dict['scores'].squeeze(0)
     e1i_idxs = data_dict['e1i'].squeeze(0)
-    e2i_idxs = data_dict['e2i'].squeeze(0) - data_dict['g1_node_count']
+    e2i_idxs = data_dict['e2i'].squeeze(0)
 
     max_score = torch.max(scores)
     rank_list = torch.argsort(1 - scores / max_score, dim=1)
@@ -63,8 +63,8 @@ def compute_hits_k(pred_dict, data_dict, k=1):
 def compute_confusion_matrix(pred_dict, data_dict):
     e1i = data_dict['e1i'].squeeze(0)
     e1j = data_dict['e1j'].squeeze(0)
-    e2i = data_dict['e2i'].squeeze(0) - data_dict['g1_node_count']
-    e2j = data_dict['e2j'].squeeze(0) - data_dict['g1_node_count']
+    e2i = data_dict['e2i'].squeeze(0)
+    e2j = data_dict['e2j'].squeeze(0)
     e1_gt_matches = [[e1i[i], e2i[i]] for i in range(len(e1i))] \
         + [[e1j[i].item(), -1] for i in range(len(e1j))]
     e2_gt_matches = [[e2i[i], e1i[i]] for i in range(len(e2i))] \

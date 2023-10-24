@@ -120,6 +120,15 @@ class InstanceSegmentationAnnotation(Annotation):
         self._instances_df = pd.DataFrame(self._instances)
 
 
+class DepthAnnotation(Annotation):
+    def __init__(self, annotation):
+        super().__init__(annotation)
+        self.imageFormat = self.annotation['imageFormat']
+        self.filename = self.annotation['filename'].split('.')[0] + '.' + self.imageFormat.lower()
+        self.dimension = np.array(self.annotation['dimension'])
+        self.measurement_strategy = self.annotation['measurementStrategy']
+
+
 class BoundingBox2DAnnotation(Annotation):
     def __init__(self, annotation):
         super().__init__(annotation)

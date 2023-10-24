@@ -15,7 +15,7 @@ from .metric import Metric, GenericMetric
 
 
 class Solo():
-    def __init__(self, path, output_dir, is_reorganized=False, move=False):
+    def __init__(self, path, output_dir='data', is_reorganized=True, move=False):
         self.path = path
         self.output_dir = output_dir
         self.output_path = os.path.join(self.path, self.output_dir)
@@ -32,6 +32,7 @@ class Solo():
         self.abbr2suffix = {
             'inst_seg': 'camera.instance segmentation.png',
             'sem_seg': 'camera.semantic segmentation.png',
+            'depth': 'camera.Depth.exr',
             'rgb': 'camera.png',
             'meta': 'frame_data.json',
         }
@@ -108,6 +109,9 @@ class Frame():
         self.captures = [Capture(capture, root) for capture in self.meta['captures']]
         metrics = [self._set_metric_(metric) for metric in self.meta['metrics']]
         self.metrics = {metric.id: metric for metric in metrics}
+        self.img_paths = {
+            abbr: os.path.join(root, abbr, f'step{self.step}.{suffix.split(".")[-1]}') for abbr, suffix in self.abbr2suffix.items()
+        }
 
     def _set_metric_(self, metric):
         metric_id = metric['id']

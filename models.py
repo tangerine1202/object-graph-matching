@@ -10,92 +10,89 @@ from scipy.optimize import minimize as scipy_minimize
 
 if torch.backends.mps.is_available():
     device = torch.device('mps')
-    device = torch.device('cpu')
 elif torch.cuda.is_available():
     device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
 print(f'torch device: {device}')
 
 
 class CustomModel(nn.Module):
-    def __init__(self, node_attr_dim, visual_dim, edge_attr_dim, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+    def __init__(self, node_attr_dim, edge_attr_dim, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
         super(CustomModel, self).__init__()
         self.node_attr_dim = node_attr_dim
-        self.visual_dim = visual_dim
         self.edge_attr_dim = edge_attr_dim
         self.emb_dim = emb_dim
+
         # matching (SuperGlue method)
         self.sinkhorn_iters = sinkhorn_iters
-        # FIXME: adjust the match_threshold
         self.match_threshold = match_threshold
-        # FIXME: what is the meaning of bin_score?
         self.bin_score = torch.tensor(bin_score).to(device)
 
-        self.node_attr_encoder = nn.Sequential(
-            nn.Linear(node_attr_dim, emb_dim),
+        self.position_encoder = nn.Sequential(
+            nn.Conv1d(2, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(64),
             nn.ReLU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.ReLU(),
+            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.bbox_encoder = nn.Sequential(
-            nn.Linear(visual_dim, emb_dim),
+            nn.Conv1d(4, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(64),
             nn.ReLU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.ReLU(),
+            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
-        self.rgb_encoder = nn.Sequential(
-            nn.Linear(visual_dim, emb_dim),
+        self.edge_attr_encoder = nn.Sequential(
+            nn.Conv1d(edge_attr_dim, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(64),
             nn.ReLU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.ReLU(),
+            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
-
-        self.fusion = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 1, emb_dim, edge_dim=edge_attr_dim), 'x, edge_index, edge_attr -> x'),
+        self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
+            # (nn.InstanceNorm1d(node_attr_dim), 'x -> x'),
+            (nn.Linear(emb_dim * 2 + 256 * 2, emb_dim), 'x -> x'),
+            # (nn.Conv1d(emb_dim * 2 + 256 * 2, emb_dim, kernel_size=1, bias=True), 'x -> x'),
+            (nn.InstanceNorm1d(emb_dim), 'x -> x'),
             (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=edge_attr_dim), 'x, edge_index, edge_attr -> x'),
+            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
-        ])
-        self.aggr = pygnn.Sequential('x, ptr', [
-            (pygnn.aggr.MaxAggregation(), 'x, ptr=ptr -> x'),
-            (nn.ReLU(inplace=True)),
-            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
-            (nn.ReLU(inplace=True)),
+            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
         ])
 
-        self.pose_lin = nn.Linear(emb_dim, 7)
+        # self.aggr = pygnn.Sequential('x, ptr', [
+        #     (pygnn.aggr.MaxAggregation(), 'x, ptr=ptr -> x'),
+        #     (nn.ReLU(inplace=True)),
+        #     (nn.Linear(emb_dim, emb_dim), 'x -> x'),
+        #     (nn.ReLU(inplace=True)),
+        # ])
+
+        # self.pose_lin = nn.Linear(emb_dim, 7)
 
     def forward(self, data_dict):
-        edge_index = data_dict['edge_index']
-        edge_attr = data_dict['edge_attr']
-        edge_index = edge_index.squeeze(0)
-        edge_attr = edge_attr.squeeze(0)
+        edge_index = data_dict['edge_index'].squeeze(0)
+        edge_attr = data_dict['edge_attr'].squeeze(0)
 
-        node_attr = F.normalize(data_dict['node_attr'], dim=-1)
-        node_attr_embs = self.node_attr_encoder(node_attr)
+        edge_attr = self.edge_attr_encoder(edge_attr.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
 
-        bbox_embs = F.normalize(data_dict['bbox_embs'], dim=-1)
-        bbox_embs = self.bbox_encoder(bbox_embs)
+        node_bbox = data_dict['node_bbox'].squeeze(0)
+        node_img = data_dict['node_img'].squeeze(0)
+        node_text = data_dict['node_text'].squeeze(0)
+        node_position = data_dict['node_position'].squeeze(0)
+        node_bbox = self.bbox_encoder(node_bbox.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
+        node_position = self.position_encoder(node_position.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
+        node_attr = torch.cat((node_bbox, node_img, node_text, node_position), dim=1)
 
-        g1_rgb_emb = F.normalize(data_dict['g1_rgb_emb'], dim=-1)
-        g1_rgb_emb = self.rgb_encoder(g1_rgb_emb)
-        g2_rgb_emb = F.normalize(data_dict['g2_rgb_emb'], dim=-1)
-        g2_rgb_emb = self.rgb_encoder(g2_rgb_emb)
-
-        # append global visual features to node visual features
-        # visual_global_emb = torch.cat(
-        #   [g1_rgb_emb.repeat(data_dict['g1_node_count'], 1),
-        #    g2_rgb_emb.repeat(data_dict['g2_node_count'], 1)], dim=0)
-        # visual_global_emb = visual_global_emb.unsqueeze(0)
-
-        fused_node_embs = torch.cat([node_attr_embs], dim=-1)
-        fused_node_embs = fused_node_embs.squeeze(0)
-        fused_node_embs = self.fusion(fused_node_embs, edge_index, edge_attr)
-        fused_node_embs = fused_node_embs.unsqueeze(0)
+        # print('node_bbox shape', node_bbox.shape)
+        # print('node_img shape', node_img.shape)
+        # print('node_text shape', node_text.shape)
+        # print('node_position shape', node_position.shape)
+        # print('node_attr shape', node_attr.shape)
+        # print('edge_attr shape', edge_attr.shape)
+        node_attr = self.layers(node_attr, edge_index, edge_attr).unsqueeze(0)
 
         # matching (SuperGlue method)
         # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
-        mdesc0 = fused_node_embs[:, :data_dict['g1_node_count']].transpose(1, 2)
-        mdesc1 = fused_node_embs[:, data_dict['g1_node_count']:].transpose(1, 2)
+        mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
+        mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
 
         # Compute matching descriptor distance.
         scores = torch.einsum('bdn,bdm->bnm', mdesc0, mdesc1)
@@ -138,9 +135,6 @@ class CustomModel(nn.Module):
             'matching_scores0': matches['matching_scores0'],
             'matching_scores1': matches['matching_scores1'],
             'scores': scores,
-            'node_attr_embs': node_attr_embs,
-            'bbox_embs': bbox_embs,
-            'joint_embs': fused_node_embs,
             # 'pose0': pred_pose0,
             # 'pose1': pred_pose1,
         }
