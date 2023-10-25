@@ -9,5 +9,6 @@ iframe_figures/
 
 venv/
 data/
+ckpt/
 
 seg_match.zip

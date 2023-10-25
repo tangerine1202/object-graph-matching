@@ -8,7 +8,6 @@ def compute_eval(pred_dict, data_dict):
 
     # confusion_matrix
     conf_matrix = compute_confusion_matrix(pred_dict, data_dict)
-    metrics['acc'] = conf_matrix['acc']
     metrics['pre'] = conf_matrix['pre']
     metrics['rec'] = conf_matrix['rec']
     metrics['f1'] = conf_matrix['f1']
@@ -60,49 +59,72 @@ def compute_hits_k(pred_dict, data_dict, k=1):
     return correct, total
 
 
+def compute_corr(pred_dict, data_dict):
+    e1i = data_dict['e1i'].squeeze(0).cpu().numpy()
+    e2i = data_dict['e2i'].squeeze(0).cpu().numpy()
+    matches0 = pred_dict['matches0'].squeeze(0).cpu().numpy()
+
+    gt_corr = {e1i[i]: e2i[i] for i in range(len(e1i))}
+    corr = {i: matches0[i] for i in range(len(matches0)) if matches0[i] != -1}
+    tp_corr = {i: corr[i] for i in corr if i in gt_corr and gt_corr[i] == corr[i]}
+    fp_corr = {i: corr[i] for i in corr if i in gt_corr and gt_corr[i] != corr[i]}
+    fn_corr = {i: gt_corr[i] for i in gt_corr if i not in corr}
+    return tp_corr, fp_corr, fn_corr, gt_corr
+
+
 def compute_confusion_matrix(pred_dict, data_dict):
-    e1i = data_dict['e1i'].squeeze(0)
-    e1j = data_dict['e1j'].squeeze(0)
-    e2i = data_dict['e2i'].squeeze(0)
-    e2j = data_dict['e2j'].squeeze(0)
+    tp_corr, fp_corr, fn_corr, gt_corr = compute_corr(pred_dict, data_dict)
+
+    tp = len(tp_corr)
+    fp = len(fp_corr)
+    fn = len(fn_corr)
+    return {
+        'TP': tp,
+        'FP': fp,
+        'FN': fn,
+        'pre': tp / (tp + fp) if tp + fp > 0 else 0,
+        'rec': tp / (tp + fn) if tp + fn > 0 else 0,
+        'f1': 2 * tp / (2 * tp + fp + fn) if tp + fp + fn > 0 else 0,
+    }
+
+    # node
     e1_gt_matches = [[e1i[i], e2i[i]] for i in range(len(e1i))] \
         + [[e1j[i].item(), -1] for i in range(len(e1j))]
     e2_gt_matches = [[e2i[i], e1i[i]] for i in range(len(e2i))] \
         + [[e2j[i].item(), -1] for i in range(len(e2j))]
-
-    TP, FP, FN, TN = 0, 0, 0, 0
-    for match in e1_gt_matches:
-        if pred_dict['matches0'][match[0]].item() == match[1]:
-            if match[1] == -1:
-                TN += 1
-            else:
-                TP += 1
-        else:
-            if match[1] == -1:
-                FP += 1
-            else:
-                FN += 1
-    for match in e2_gt_matches:
-        if pred_dict['matches1'][match[0]].item() == match[1]:
-            if match[1] == -1:
-                TN += 1
-            else:
-                TP += 1
-        else:
-            if match[1] == -1:
-                FP += 1
-            else:
-                FN += 1
-    return {
-        'TP': TP,
-        'FP': FP,
-        'FN': FN,
-        'TN': TN,
-        'acc': (TP + TN) / (TP + TN + FP + FN) if TP + TN + FP + FN > 0 else 0,
-        'pre': TP / (TP + FP) if TP + FP > 0 else 0,
-        'rec': TP / (TP + FN) if TP + FN > 0 else 0,
-        'f1': 2 * TP / (2 * TP + FP + FN) if TP + FP + FN > 0 else 0,
-    }
+    # TP, FP, FN, TN = 0, 0, 0, 0
+    # for match in e1_gt_matches:
+    #     if pred_dict['matches0'][match[0]].item() == match[1]:
+    #         if match[1] == -1:
+    #             TN += 1
+    #         else:
+    #             TP += 1
+    #     else:
+    #         if match[1] == -1:
+    #             FP += 1
+    #         else:
+    #             FN += 1
+    # for match in e2_gt_matches:
+    #     if pred_dict['matches1'][match[0]].item() == match[1]:
+    #         if match[1] == -1:
+    #             TN += 1
+    #         else:
+    #             TP += 1
+    #     else:
+    #         if match[1] == -1:
+    #             FP += 1
+    #         else:
+    #             FN += 1
+    # return {
+    #     'TP': TP,
+    #     'FP': FP,
+    #     'FN': FN,
+    #     'TN': TN,
+    #     'acc': (TP + TN) / (TP + TN + FP + FN) if TP + TN + FP + FN > 0 else 0,
+    #     'pre': TP / (TP + FP) if TP + FP > 0 else 0,
+    #     'rec': TP / (TP + FN) if TP + FN > 0 else 0,
+    #     'f1': 2 * TP / (2 * TP + FP + FN) if TP + FP + FN > 0 else 0,
+    # }
 
 
 def computer_translation_error(pred_pos, gt_pos):

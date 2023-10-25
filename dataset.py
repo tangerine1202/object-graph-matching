@@ -1,5 +1,5 @@
 import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
 import glob
 import pickle as pkl
 
@@ -8,8 +8,7 @@ import pandas as pd
 import torch
 import torchvision.transforms.functional as VF
 from torch.utils.data import Dataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Data, Dataset, InMemoryDataset
+from torch_geometric.data import Dataset
 from solo2graph import Graph, PairedGraph
 
 
@@ -39,16 +38,33 @@ def transform_data(pg):
     data = {}
 
     # node attr
+    data['node_position'] = torch.cat((
+        torch.tensor(pg.node_feat['bbox_cx'], dtype=torch.float),
+        torch.tensor(pg.node_feat['bbox_cy'], dtype=torch.float)
+    ), dim=1) / 320
     data['node_bbox'] = torch.cat((
         torch.tensor(pg.node_feat['bbox_cx'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox_cy'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox_h'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox_w'], dtype=torch.float),
+        torch.tensor(pg.node_feat['bbox_h'] * pg.node_feat['bbox_w'], dtype=torch.float) / (320 ** 2),  # size
     ), dim=1) / 320
-    data['node_img'] = torch.tensor(pg.node_feat['bbox_norm_image'], dtype=torch.float)
-    data['node_text'] = torch.tensor(pg.node_feat['bbox_norm_text'], dtype=torch.float)
-    data['node_position'] = torch.cat((torch.tensor(pg.node_feat['bbox_cx'], dtype=torch.float),
-                                      torch.tensor(pg.node_feat['bbox_cy'], dtype=torch.float)), dim=1) / 320
+    # data['node_bbox3d'] = torch.cat((
+    #     torch.tensor(pg.node_feat['bbox3d_tx'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_ty'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_tz'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_qx'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_qy'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_qz'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_qw'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_sx'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_sy'], dtype=torch.float),
+    #     torch.tensor(pg.node_feat['bbox3d_sz'], dtype=torch.float),
+    # ), dim=1)
+
+    # data['node_img'] = torch.tensor(pg.node_feat['bbox_norm_image'], dtype=torch.float)
+    data['node_text'] = torch.tensor(pg.node_feat['bbox_text'], dtype=torch.float)
+    data['node_norm_text'] = torch.tensor(pg.node_feat['bbox_norm_text'], dtype=torch.float)
 
     # edge attr
     data['edge_index'] = torch.tensor(pg.edge_index, dtype=torch.long)

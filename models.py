@@ -1,5 +1,5 @@
 import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
 from torch_geometric.nn import GATv2Conv
 import torch_geometric.nn as pygnn
 import torch.nn.functional as F
@@ -36,7 +36,7 @@ class CustomModel(nn.Module):
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.bbox_encoder = nn.Sequential(
-            nn.Conv1d(4, 64, kernel_size=1, bias=True),
+            nn.Conv1d(5, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
@@ -47,15 +47,18 @@ class CustomModel(nn.Module):
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
+        self.txt_encoder = nn.Sequential(
+            nn.Conv1d(768, emb_dim, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(emb_dim, emb_dim, kernel_size=1, bias=True),
+        )
         self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            # (nn.InstanceNorm1d(node_attr_dim), 'x -> x'),
-            (nn.Linear(emb_dim * 2 + 256 * 2, emb_dim), 'x -> x'),
-            # (nn.Conv1d(emb_dim * 2 + 256 * 2, emb_dim, kernel_size=1, bias=True), 'x -> x'),
-            (nn.InstanceNorm1d(emb_dim), 'x -> x'),
+            (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
         ])
 
         # self.aggr = pygnn.Sequential('x, ptr', [
@@ -69,24 +72,18 @@ class CustomModel(nn.Module):
 
     def forward(self, data_dict):
         edge_index = data_dict['edge_index'].squeeze(0)
-        edge_attr = data_dict['edge_attr'].squeeze(0)
+        edge_attr = data_dict['edge_attr']
+        node_position = data_dict['node_position']
+        node_bbox = data_dict['node_bbox']
+        # node_img = data_dict['node_img']
+        node_text = data_dict['node_text']
+        # node_norm_text = data_dict['node_norm_text']
 
-        edge_attr = self.edge_attr_encoder(edge_attr.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
-
-        node_bbox = data_dict['node_bbox'].squeeze(0)
-        node_img = data_dict['node_img'].squeeze(0)
-        node_text = data_dict['node_text'].squeeze(0)
-        node_position = data_dict['node_position'].squeeze(0)
-        node_bbox = self.bbox_encoder(node_bbox.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
-        node_position = self.position_encoder(node_position.transpose(0, 1).unsqueeze(0)).squeeze(0).transpose(0, 1)
-        node_attr = torch.cat((node_bbox, node_img, node_text, node_position), dim=1)
-
-        # print('node_bbox shape', node_bbox.shape)
-        # print('node_img shape', node_img.shape)
-        # print('node_text shape', node_text.shape)
-        # print('node_position shape', node_position.shape)
-        # print('node_attr shape', node_attr.shape)
-        # print('edge_attr shape', edge_attr.shape)
+        edge_attr = self.edge_attr_encoder(edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        node_position = self.position_encoder(node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        node_bbox = self.bbox_encoder(node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        node_text = self.txt_encoder(node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        node_attr = torch.cat((node_position, node_bbox, node_text), dim=1)
         node_attr = self.layers(node_attr, edge_index, edge_attr).unsqueeze(0)
 
         # matching (SuperGlue method)

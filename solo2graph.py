@@ -76,7 +76,8 @@ def extract_features(raw_image, text):
 
 
 class Graph:
-    def __init__(self, f, solo, drop_no_instance=True):
+    def __init__(self, f, solo, min_bbox_size=0, drop_no_instance=True):
+        self.min_bbox_size = min_bbox_size
         valid, data = self.frame_to_data(f, solo)
         self.valid = valid
         self.data = data
@@ -150,6 +151,10 @@ class Graph:
         bbox = annos['bounding box']
         bbox_df = bbox.values_df
 
+        if 'bounding box 3D' in annos:
+            bbox3d = annos['bounding box 3D']
+            bbox3d_df = bbox3d.values_df
+
         meta = metrics['metadata']
         env_meta = meta.env_metadata
         meta_df = meta.instances_df
@@ -167,23 +172,29 @@ class Graph:
         obj_df = pd.concat((obj_df, pos_df), axis=1).drop(columns=['object_absPos'])
 
         # merge annotations
-        bbox_df_for_merge = bbox_df.copy() \
-            .drop(columns=['labelName', 'labelId']) \
-            .add_prefix('bbox_') \
-            .rename(columns={'bbox_instanceId': 'instanceId'})
         inst_df_for_merge = inst_df.copy() \
             .drop(columns=['labelName', 'labelId', 'color']) \
             .add_prefix('inst_') \
             .rename(columns={'inst_instanceId': 'instanceId'})
-        obj_df = pd.merge(obj_df, bbox_df_for_merge, how='inner', left_on='instanceId',
-                          right_on='instanceId', suffixes=('', '_duplicated'))
+        bbox_df_for_merge = bbox_df.copy() \
+            .drop(columns=['labelName', 'labelId']) \
+            .add_prefix('bbox_') \
+            .rename(columns={'bbox_instanceId': 'instanceId'})
+        # bbox3d_df_for_merge = bbox3d_df.copy() \
+        #     .drop(columns=['labelName', 'labelId']) \
+        #     .add_prefix('bbox3d_') \
+        #     .rename(columns={'bbox3d_instanceId': 'instanceId'})
         obj_df = pd.merge(obj_df, inst_df_for_merge, how='inner', left_on='instanceId',
                           right_on='instanceId', suffixes=('', '_duplicated'))
+        obj_df = pd.merge(obj_df, bbox_df_for_merge, how='inner', left_on='instanceId',
+                          right_on='instanceId', suffixes=('', '_duplicated'))
+        # obj_df = pd.merge(obj_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
+        #                   right_on='instanceId', suffixes=('', '_duplicated'))
         obj_df = obj_df.rename(columns={'instanceId': 'inst_id'})
 
         # filter out small object
-        # mask = obj_df['bbox_w'] * obj_df['bbox_h'] > 500
-        # obj_df = obj_df[mask]
+        mask = obj_df['bbox_w'] * obj_df['bbox_h'] > self.min_bbox_size
+        obj_df = obj_df[mask]
 
         obj_df = obj_df.reset_index(drop=True)
 
@@ -237,7 +248,7 @@ class PairedGraph:
         self.n2 = len(g2)
         self.n = self.n1 + self.n2
 
-        self.node_attr = np.concatenate([g1.node_attr, g2.node_attr], axis=0)
+        # self.node_attr = np.concatenate([g1.node_attr, g2.node_attr], axis=0)
         self.node_feat = {}
         self.comp_node_feat()
         # edge index
@@ -288,10 +299,10 @@ class PairedGraph:
     def comp_matching(self):
         self.all_inst_ids = list(set(self.g1.inst_ids) | set(self.g2.inst_ids))
         self.anchor_inst_ids = list(set(self.g1.inst_ids) & set(self.g2.inst_ids))
-        self.e1i = [g1.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
-        self.e1j = [g1.inst2node[inst_id] for inst_id in self.g1.inst_ids if inst_id not in self.anchor_inst_ids]
-        self.e2i = [g2.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
-        self.e2j = [g2.inst2node[inst_id] for inst_id in self.g2.inst_ids if inst_id not in self.anchor_inst_ids]
+        self.e1i = [self.g1.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
+        self.e1j = [self.g1.inst2node[inst_id] for inst_id in self.g1.inst_ids if inst_id not in self.anchor_inst_ids]
+        self.e2i = [self.g2.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
+        self.e2j = [self.g2.inst2node[inst_id] for inst_id in self.g2.inst_ids if inst_id not in self.anchor_inst_ids]
 
     def __len__(self):
         return self.n
@@ -303,7 +314,7 @@ if __name__ == '__main__':
                         type=str,
                         help='path to solo output',
                         required=True)
-    parser.add_argument('--reorganized',
+    parser.add_argument('--not_reorganized',
                         action='store_true',
                         help='whether the data has been reorganized')
     parser.add_argument('--move',
@@ -313,44 +324,67 @@ if __name__ == '__main__':
                         type=str,
                         default='data',
                         help='name of the reorganized output directory')
+    parser.add_argument('--skip_single_graph',
+                        action='store_true',
+                        help='skip single graph generation')
     parser.add_argument('--single_graph_dir',
                         type=str,
                         default='graph',
                         help='name of the single graph directory')
+    parser.add_argument('--min_bbox_size',
+                        type=int,
+                        default=0,
+                        help='minimum bbox size to be included in the graph')
     parser.add_argument('--keep_no_instance',
                         action='store_true',
                         help='skip frames with no instance')
+
     parser.add_argument('--paired_graph_dir',
                         type=str,
                         default='paired_graph',
                         help='name of the paired graph directory')
+    parser.add_argument('--min_overlap',
+                        type=int,
+                        default=1,
+                        help='minimum number of overlap instances')
+    parser.add_argument('--keep_non_overlap_graph',
+                        action='store_true',
+                        help='keep non-overlap graph generation')
     args = parser.parse_args()
 
     SINGLE_GRAPH_PATH = os.path.join(args.path, args.single_graph_dir)
     PAIRED_GRAPH_PATH = os.path.join(args.path, args.paired_graph_dir)
+    NON_OVERLAP_GRAPH_PATH = os.path.join(args.path, f'all_{args.paired_graph_dir}')
 
-    if os.path.exists(SINGLE_GRAPH_PATH):
-        print(f'remove {SINGLE_GRAPH_PATH}')
-        shutil.rmtree(SINGLE_GRAPH_PATH)
-    os.mkdir(SINGLE_GRAPH_PATH)
+    if not args.skip_single_graph:
+        if os.path.exists(SINGLE_GRAPH_PATH):
+            print(f'remove {SINGLE_GRAPH_PATH}')
+            shutil.rmtree(SINGLE_GRAPH_PATH)
+        os.mkdir(SINGLE_GRAPH_PATH)
 
-    if os.path.exists(PAIRED_GRAPH_PATH):
-        print(f'remove {PAIRED_GRAPH_PATH}')
-        shutil.rmtree(PAIRED_GRAPH_PATH)
-    os.mkdir(PAIRED_GRAPH_PATH)
+        solo = Solo(args.path, args.output_dir, is_reorganized=(not args.not_reorganized), move=args.move)
 
-    model, vis_processors, txt_processors = load_model_and_preprocess(
-        name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
+        model, vis_processors, txt_processors = load_model_and_preprocess(
+            name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
+        for f in tqdm(solo.frames()):
+            graph = Graph(f, solo, min_bbox_size=args.min_bbox_size, drop_no_instance=(not args.keep_no_instance))
+            if not graph.valid and not args.keep_no_instance:
+                print(f'step {f.step} is invalid')
+                continue
+            graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
+            pkl.dump(graph, open(graph_path, 'wb'))
 
-    solo = Solo(args.path, args.output_dir, is_reorganized=args.reorganized, move=args.move)
-
-    for f in tqdm(solo.frames()):
-        graph = Graph(f, solo, drop_no_instance=(not args.keep_no_instance))
-        if not graph.valid and not args.keep_no_instance:
-            print(f'step {f.step} is invalid')
-            continue
-        graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
-        pkl.dump(graph, open(graph_path, 'wb'))
+    # paired graph
+    if not args.keep_non_overlap_graph:
+        if os.path.exists(PAIRED_GRAPH_PATH):
+            print(f'remove {PAIRED_GRAPH_PATH}')
+            shutil.rmtree(PAIRED_GRAPH_PATH)
+        os.mkdir(PAIRED_GRAPH_PATH)
+    else:
+        if os.path.exists(NON_OVERLAP_GRAPH_PATH):
+            print(f'remove {NON_OVERLAP_GRAPH_PATH}')
+            shutil.rmtree(NON_OVERLAP_GRAPH_PATH)
+        os.mkdir(NON_OVERLAP_GRAPH_PATH)
 
     paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
     for p1 in tqdm(paths):
@@ -362,14 +396,19 @@ if __name__ == '__main__':
             fname1 = os.path.basename(p1).split('.')[0]
             fname2 = os.path.basename(p2).split('.')[0]
             paired_graph_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
+            non_overlap_paired_graph_path = os.path.join(NON_OVERLAP_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
 
             pg = PairedGraph(g1, g2)
             num_overlap = len(pg.e1i)
             num_edges = len(pg.edge_index.T)
-            if num_overlap < 1 or num_edges < 1:
-                continue
-            if num_overlap < 4:
-                continue
-                # no enough matching for p3p
 
-            pkl.dump(pg, open(paired_graph_path, 'wb'))
+            if args.keep_non_overlap_graph:
+                pkl.dump(pg, open(non_overlap_paired_graph_path, 'wb'))
+            else:
+                # if num_overlap < 1 or num_edges < 1:
+                #     continue
+                # if num_overlap < 4:
+                #     continue
+                if num_overlap < args.min_overlap:
+                    continue
+                pkl.dump(pg, open(paired_graph_path, 'wb'))
