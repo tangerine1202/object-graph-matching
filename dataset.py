@@ -3,20 +3,42 @@ os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
 import glob
 import pickle as pkl
 
+from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import torch
 import torchvision.transforms.functional as VF
 from torch.utils.data import Dataset
 from torch_geometric.data import Dataset
+
 from solo2graph import Graph, PairedGraph
 
 
 class CustomDataset(Dataset):
-    def __init__(self, root, transform=None):
+    def __init__(self, root, transform=None, max_len=None, min_overlap=1):
         self.root = root
-        self.file_names = sorted([os.path.basename(name) for name in glob.glob(os.path.join(root, '*.pkl'))])
         self.transform = transform
+        self.max_len = max_len
+        self.file_names = [os.path.basename(name) for name in glob.glob(os.path.join(root, '*.pkl'))]
+        np.random.shuffle(self.file_names)
+
+        if min_overlap > 1:
+            self.filter_by_overlap(min_overlap=min_overlap)
+        if max_len is not None and len(self.file_names) > max_len:
+            self.file_names = np.random.choice(self.file_names, max_len, replace=False)
+
+    def filter_by_overlap(self, min_overlap=1):
+        new_file_names = []
+        cnt = 0
+        for name in self.file_names:
+            pg_path = os.path.join(self.root, name)
+            pg = pkl.load(open(pg_path, 'rb'))
+            if len(pg.e1i) >= min_overlap:
+                new_file_names.append(name)
+                cnt += 1
+            if self.max_len is not None and cnt >= self.max_len:
+                break
+        self.file_names = new_file_names
 
     def __getitem__(self, idx):
         pg_path = os.path.join(self.root, self.file_names[idx])
