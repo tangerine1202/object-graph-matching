@@ -18,9 +18,8 @@ print(f'torch device: {device}')
 
 
 class CustomModel(nn.Module):
-    def __init__(self, node_attr_dim, edge_attr_dim, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+    def __init__(self, edge_attr_dim, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
         super(CustomModel, self).__init__()
-        self.node_attr_dim = node_attr_dim
         self.edge_attr_dim = edge_attr_dim
         self.emb_dim = emb_dim
 
@@ -48,10 +47,10 @@ class CustomModel(nn.Module):
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, emb_dim, kernel_size=1, bias=True),
+            nn.Conv1d(768, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
-            nn.Conv1d(emb_dim, emb_dim, kernel_size=1, bias=True),
+            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
             (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
