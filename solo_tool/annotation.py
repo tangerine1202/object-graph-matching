@@ -40,10 +40,9 @@ class SemanticSegmentationAnnotation(Annotation):
         self.imageFormat = self.annotation['imageFormat']
         self.filename = self.annotation['filename'].split('.')[0] + '.' + self.imageFormat.lower()
         self.dimension = np.array(self.annotation['dimension'])
-        self.has_instance = 'instances' in self.annotation.keys()
+        self.has_instance = 'instances' in self.annotation.keys() and len(self.annotation['instances']) > 0
         self._instances = self.annotation['instances'] if self.has_instance else []
         self._instances_df = pd.DataFrame(self._instances)
-        self._add_masks_()
 
     @property
     def instances(self):
@@ -53,7 +52,7 @@ class SemanticSegmentationAnnotation(Annotation):
     def instances_df(self):
         return self._instances_df.copy()
 
-    def _add_masks_(self):
+    def add_masks(self):
         if not self.has_instance:
             msg = f'No instances to create masks for {self.filename}'
             warnings.warn(msg)
@@ -83,10 +82,9 @@ class InstanceSegmentationAnnotation(Annotation):
         self.imageFormat = self.annotation['imageFormat']
         self.filename = self.annotation['filename'].split('.')[0] + '.' + self.imageFormat.lower()
         self.dimension = np.array(self.annotation['dimension'])
-        self.has_instance = 'instances' in self.annotation.keys()
+        self.has_instance = 'instances' in self.annotation.keys() and len(self.annotation['instances']) > 0
         self._instances = self.annotation['instances'] if self.has_instance else []
         self._instances_df = pd.DataFrame(self._instances)
-        self._add_masks_()
 
     @property
     def instances(self):
@@ -96,7 +94,7 @@ class InstanceSegmentationAnnotation(Annotation):
     def instances_df(self):
         return self._instances_df.copy()
 
-    def _add_masks_(self):
+    def add_masks(self):
         if not self.has_instance:
             msg = f'No instances to create masks for {self.filename}'
             warnings.warn(msg)
@@ -132,7 +130,7 @@ class DepthAnnotation(Annotation):
 class BoundingBox2DAnnotation(Annotation):
     def __init__(self, annotation):
         super().__init__(annotation)
-        self.has_instance = 'values' in self.annotation.keys()
+        self.has_instance = 'values' in self.annotation.keys() and len(self.annotation['values']) > 0
         self._values = self.annotation['values'] if self.has_instance else []
         self._values_df = self._prepare_values_df_(self._values) if self.has_instance else pd.DataFrame()
 
@@ -157,7 +155,7 @@ class BoundingBox2DAnnotation(Annotation):
 class BoundingBox3DAnnotation(Annotation):
     def __init__(self, annotation):
         super().__init__(annotation)
-        self.has_instance = 'values' in self.annotation.keys()
+        self.has_instance = 'values' in self.annotation.keys() and len(self.annotation['values']) > 0
         self._values = self.annotation['values'] if self.has_instance else []
         self._values_df = self._prepare_values_df_(self._values) if self.has_instance else pd.DataFrame()
 

@@ -11,7 +11,7 @@ import torchvision.transforms.functional as VF
 from torch.utils.data import Dataset
 from torch_geometric.data import Dataset
 
-from solo2graph import Graph, PairedGraph
+from solo2graph import QueryGraph, PairedGraph
 
 
 class CustomDataset(Dataset):
@@ -85,8 +85,8 @@ def transform_data(pg):
     # ), dim=1)
 
     # data['node_img'] = torch.tensor(pg.node_feat['bbox_norm_image'], dtype=torch.float)
-    data['node_text'] = torch.tensor(pg.node_feat['bbox_text'], dtype=torch.float)
-    data['node_norm_text'] = torch.tensor(pg.node_feat['bbox_norm_text'], dtype=torch.float)
+    data['node_text'] = torch.tensor(pg.node_feat['text_embs'], dtype=torch.float)
+    data['node_norm_text'] = torch.tensor(pg.node_feat['norm_text_embs'], dtype=torch.float)
 
     # edge attr
     data['edge_index'] = torch.tensor(pg.edge_index, dtype=torch.long)

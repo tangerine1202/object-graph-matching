@@ -12,6 +12,11 @@ class AnnotationDefinition():
         self.name2id = {}
 
 
+class DepthAnnotationDefinition(AnnotationDefinition):
+    def __init__(self, annotation_def):
+        super().__init__(annotation_def)
+
+
 class InstanceSegmentationAnnotationDefinition(AnnotationDefinition):
     def __init__(self, annotation_def):
         super().__init__(annotation_def)
@@ -21,11 +26,6 @@ class InstanceSegmentationAnnotationDefinition(AnnotationDefinition):
         else:
             self.id2name = {label['label_id']: label['label_name'] for label in self.spec}
             self.name2id = {label['label_name']: label['label_id'] for label in self.spec}
-
-
-class DepthAnnotationDefinition(AnnotationDefinition):
-    def __init__(self, annotation_def):
-        super().__init__(annotation_def)
 
 
 class BoundingBox2DAnnotationDefinition(AnnotationDefinition):

@@ -9,6 +9,7 @@ import shutil
 
 from tqdm.auto import tqdm
 
+from scipy.spatial.transform import Rotation as R
 import numpy as np
 import pandas as pd
 import cv2
@@ -30,7 +31,19 @@ else:
     device = 'cpu'
 
 
-def extract_features(raw_image, text):
+def extract_text_features(text):
+    text_input = txt_processors["eval"](text)
+    sample = {"text_input": [text_input]}
+    features_text = model.extract_features(sample, mode="text")  # torch.Size([1, words, 768])
+    feat_txt = features_text.text_embeds[:, 0, :].cpu().numpy()
+    feat_norm_txt = features_text.text_embeds_proj[:, 0, :].cpu().numpy()
+    return {
+        'text': feat_txt,
+        'norm_text': feat_norm_txt,
+    }
+
+
+def extract_multimodal_features(raw_image, text):
     """
     LAVIS Unified Feature Extraction Interface
 
@@ -46,25 +59,17 @@ def extract_features(raw_image, text):
     sample = {"image": image, "text_input": [text_input]}
 
     features_multimodal = model.extract_features(sample)  # torch.Size([1, 32, 768]), 32 is the number of queries
-
     features_image = model.extract_features(sample, mode="image")  # torch.Size([1, 32, 768])
     features_text = model.extract_features(sample, mode="text")  # torch.Size([1, words, 768])
 
     # multimodal feature
-    # use features_multimodal[:,0,:] for multimodal classification tasks
     feat_multimodal = features_multimodal.multimodal_embeds[:, 0, :].cpu().numpy()
-
     # uni-modal features
     feat_img = features_image.image_embeds[:, 0, :].cpu().numpy()
     feat_txt = features_text.text_embeds[:, 0, :].cpu().numpy()
-
     # normalized low-dimensional uni-modal features
-    # norm_img: torch.Size([1, 197, 256])
-    # norm_tex: torch.Size([1, words, 256])
-    feat_norm_img = features_image.image_embeds_proj[:, 0, :].cpu().numpy()
-    feat_norm_txt = features_text.text_embeds_proj[:, 0, :].cpu().numpy()
-    # similarity = (features_image.image_embeds_proj @ features_text.text_embeds_proj[:,0,:].t()).max()
-    # similarity = (features_image.image_embeds_proj[:,0,:] @ features_text.text_embeds_proj[:,0,:].t())
+    feat_norm_img = features_image.image_embeds_proj[:, 0, :].cpu().numpy()  # norm_img: torch.Size([1, 197, 256])
+    feat_norm_txt = features_text.text_embeds_proj[:, 0, :].cpu().numpy()  # norm_tex: torch.Size([1, words, 256])
 
     return {
         'multimodal': feat_multimodal,
@@ -75,7 +80,99 @@ def extract_features(raw_image, text):
     }
 
 
-class Graph:
+class MapGraph:
+    def __init__(self, f, solo):
+        self.data = self.frame_to_data(f, solo)
+
+        self.total_inst_cnt = self.data['total_obj_cnt']
+        self.inst_ids = self.data['inst_ids']
+        self.inst2node = self.data['inst2node']
+
+        self.node_ids = self.data['node_ids']
+        self.edge_index = self.data['edge_index']
+        self.node_feat = self.data['features']
+
+        self.edge_attr = self.comp_bbox3d_edge_attr()
+        # self.adj = self.edge_index2adj()
+
+    def __len__(self):
+        return len(self.node_ids)
+
+    def comp_bbox3d_edge_attr(self):
+        # raise NotImplementedError
+        pass
+
+    def frame_to_data(self, f, solo):
+        data_path = solo.path
+        step = f.step
+        cap = f.captures[0]
+        metrics = f.metrics
+        anno_defs = solo.annotation_definitions
+        annos = cap.annotations
+
+        inst = annos['instance segmentation']
+        inst_df = inst.instances_df
+
+        # FIXME: skip frames with no instance
+        # if not inst.has_instance:
+        #     return False, None
+
+        meta = metrics['metadata']
+        env_meta = meta.env_metadata
+        meta_df = meta.instances_df
+
+        # === map ===
+        map_df = meta_df.copy()
+        # rename label columns
+        map_df = map_df.rename(columns={'object_labelName': 'label_name'})
+        map_df['label_id'] = map_df['label_name'].apply(lambda x: anno_defs['instance segmentation'].name2id[x])
+
+        # bbox3d
+        world_bbox3d_t_df = map_df['object_translation'].apply(pd.Series).rename(
+            columns={0: 'bbox3d_tx', 1: 'bbox3d_ty', 2: 'bbox3d_tz'})
+        world_bbox3d_q_df = map_df['object_rotation'].apply(pd.Series).rename(
+            columns={0: 'bbox3d_qx', 1: 'bbox3d_qy', 2: 'bbox3d_qz', 3: 'bbox3d_qw'})
+        world_bbox3d_s_df = map_df['object_size'].apply(pd.Series).rename(
+            columns={0: 'bbox3d_sx', 1: 'bbox3d_sy', 2: 'bbox3d_sz'})
+        map_df = pd.concat((map_df, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df), axis=1)
+        map_df = map_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
+
+        # rename instance id after merging tabel
+        map_df = map_df.rename(columns={'instanceId': 'inst_id'})
+
+        # semantic label
+        embs = {}
+        for _, obj in map_df.iterrows():
+            label_name = obj['label_name']
+            text_features = extract_text_features(label_name)
+            for k, v in text_features.items():
+                if k not in embs:
+                    embs[k] = []
+                embs[k].append(v)
+        embs = {k: np.vstack(v) for k, v in embs.items()}
+
+        features = {
+            **{k: np.asarray(v).reshape(-1, 1) for k, v in map_df.items()},
+            **{f'{k}_embs': v for k, v in embs.items()}
+        }
+
+        node_ids = map_df.index.to_list()
+        edge_index = np.array([[i, j] for i in node_ids for j in node_ids if i != j]).T
+        inst_ids = map_df['inst_id'].to_list()
+        inst2node = {inst_id: node_id for node_id, inst_id in enumerate(inst_ids)}
+
+        data_dict = {
+            'node_ids': node_ids,
+            'edge_index': edge_index,
+            'inst_ids': inst_ids,
+            'inst2node': inst2node,
+            'features': features,
+            'total_obj_cnt': len(map_df),
+        }
+        return data_dict
+
+
+class QueryGraph:
     def __init__(self, f, solo, min_bbox_size=0, drop_no_instance=True):
         self.min_bbox_size = min_bbox_size
         valid, data = self.frame_to_data(f, solo)
@@ -97,20 +194,18 @@ class Graph:
         self.edge_index = self.data['edge_index']
         self.node_feat = self.data['features']
 
-        self.node_attr = self.comp_node_attr()
-        self.edge_attr = self.comp_edge_attr()
+        self.edge_attr = self.comp_bbox2d_edge_attr()
+        # self.edge_attr = self.comp_bbox3d_edge_attr()
         # self.adj = self.edge_index2adj()
 
     def __len__(self):
         return len(self.node_ids)
 
-    def comp_node_attr(self):
-        attr = np.empty((len(self.node_ids), 0))
-        for feature in self.node_feat.values():
-            attr = np.concatenate((attr, feature), axis=1)
-        return attr
+    def comp_bbox3d_edge_attr(self):
+        # raise NotImplementedError
+        pass
 
-    def comp_edge_attr(self):
+    def comp_bbox2d_edge_attr(self):
         cols = ['bbox_cx', 'bbox_cy']
         node_df = pd.DataFrame({k: self.node_feat[k][:, 0] for k in cols})
         node_df['node_id'] = self.node_ids
@@ -133,8 +228,7 @@ class Graph:
         return adj
 
     def frame_to_data(self, f, solo):
-        data_dict = {}
-        data_path = solo.output_path
+        data_path = solo.path
         step = f.step
         cap = f.captures[0]
         metrics = f.metrics
@@ -144,32 +238,54 @@ class Graph:
         inst = annos['instance segmentation']
         inst_df = inst.instances_df
 
-        # FIXME: skip frames with no instance
-        if not inst.has_instance:
-            return False, None
-
         bbox = annos['bounding box']
         bbox_df = bbox.values_df
 
-        if 'bounding box 3D' in annos:
-            bbox3d = annos['bounding box 3D']
-            bbox3d_df = bbox3d.values_df
+        # FIXME: there is small difference between this bbox3d and the one in metadata.
+        #        we convert the one in metadata to the camera view for now.
+        # bbox3d = annos['bounding box 3D']
+        # bbox3d_df = bbox3d.values_df
 
         meta = metrics['metadata']
         env_meta = meta.env_metadata
         meta_df = meta.instances_df
 
-        # prepare object dataframe
-        obj_df = meta_df.copy()
-        # filter invisible objects
-        obj_df = obj_df[obj_df['instanceId'].isin(inst_df['instanceId'])]
-        # rename columns
-        obj_df = obj_df.rename(columns={'object_labelName': 'label_name'})
-        obj_df['label_id'] = obj_df['label_name'].apply(lambda x: anno_defs['bounding box'].name2id[x])
+        # FIXME: skip frames with no instance
+        if not inst.has_instance:
+            return False, None
+
+        # === query ===
+        query_df = meta_df.copy()
+
+        # filter out invisible objects
+        query_df = query_df[query_df['instanceId'].isin(inst_df['instanceId'])]
+        # rename label columns
+        query_df = query_df.rename(columns={'object_labelName': 'label_name'})
+        query_df['label_id'] = query_df['label_name'].apply(lambda x: anno_defs['instance segmentation'].name2id[x])
 
         # add columns
-        pos_df = obj_df['object_absPos'].apply(pd.Series).rename(columns={0: 'pos_x', 1: 'pos_y', 2: 'pos_z'})
-        obj_df = pd.concat((obj_df, pos_df), axis=1).drop(columns=['object_absPos'])
+        # def local_bbox3d(cam_pose, world_t, world_q, world_s):
+        #     # convert bbox3d from global to local
+        #     cam_t = cam_pose[:3]
+        #     cam_R = R.from_quat(cam_pose[3:])
+        #     local_t = cam_R.inv().apply(world_t - cam_t)
+        #     local_r = cam_R.inv() * R.from_quat(world_q)
+        #     local_s = world_s
+        #     local_t = pd.DataFrame(local_t, columns=['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz'])
+        #     local_r = pd.DataFrame(local_r.as_quat(), columns=['bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw'])
+        #     local_s = pd.DataFrame(local_s, columns=['bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'])
+        #     return local_t, local_r, local_s
+
+        # world_bbox3d_t_df = query_df['object_translation'].apply(pd.Series).rename(
+        #     columns={0: 'bbox3d_tx', 1: 'bbox3d_ty', 2: 'bbox3d_tz'})
+        # world_bbox3d_q_df = query_df['object_rotation'].apply(pd.Series).rename(
+        #     columns={0: 'bbox3d_qx', 1: 'bbox3d_qy', 2: 'bbox3d_qz', 3: 'bbox3d_qw'})
+        # world_bbox3d_s_df = query_df['object_size'].apply(pd.Series).rename(
+        #     columns={0: 'bbox3d_sx', 1: 'bbox3d_sy', 2: 'bbox3d_sz'})
+        # query_df = query_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
+        # local_bbox3d_t_df, local_bbox3d_q_df, local_bbox3d_s_df = local_bbox3d(
+        #     cap.camera_pose, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df)
+        # query_df = pd.concat((query_df, local_bbox3d_t_df, local_bbox3d_q_df, local_bbox3d_s_df), axis=1)
 
         # merge annotations
         inst_df_for_merge = inst_df.copy() \
@@ -184,45 +300,53 @@ class Graph:
         #     .drop(columns=['labelName', 'labelId']) \
         #     .add_prefix('bbox3d_') \
         #     .rename(columns={'bbox3d_instanceId': 'instanceId'})
-        obj_df = pd.merge(obj_df, inst_df_for_merge, how='inner', left_on='instanceId',
-                          right_on='instanceId', suffixes=('', '_duplicated'))
-        obj_df = pd.merge(obj_df, bbox_df_for_merge, how='inner', left_on='instanceId',
-                          right_on='instanceId', suffixes=('', '_duplicated'))
+        query_df = pd.merge(query_df, inst_df_for_merge, how='inner', left_on='instanceId',
+                            right_on='instanceId', suffixes=('', '_duplicated'))
+        query_df = pd.merge(query_df, bbox_df_for_merge, how='inner', left_on='instanceId',
+                            right_on='instanceId', suffixes=('', '_duplicated'))
         # obj_df = pd.merge(obj_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
         #                   right_on='instanceId', suffixes=('', '_duplicated'))
-        obj_df = obj_df.rename(columns={'instanceId': 'inst_id'})
+        query_df = query_df.rename(columns={'instanceId': 'inst_id'})
 
         # filter out small object
-        mask = obj_df['bbox_w'] * obj_df['bbox_h'] > self.min_bbox_size
-        obj_df = obj_df[mask]
-
-        obj_df = obj_df.reset_index(drop=True)
-
-        if len(obj_df) <= 1:
+        mask = query_df['bbox_w'] * query_df['bbox_h'] > self.min_bbox_size
+        query_df = query_df[mask].reset_index(drop=True)
+        if len(query_df) <= 1:
             return False, None
 
-        # extract  features
-        bbox_embs = {}
-        rgb_path = f'{data_path}/rgb/step{step}.png'
-        rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
-        for _, obj in obj_df.iterrows():
-            top, left, w, h = int(obj['bbox_y0']), int(obj['bbox_x0']), int(obj['bbox_w']), int(obj['bbox_h'])
-            crop_img = rgb_img[top:top + h, left:left + w, :]
-            features = extract_features(crop_img, obj['label_name'])
-            for k, v in features.items():
-                if k not in bbox_embs:
-                    bbox_embs[k] = []
-                bbox_embs[k].append(v)
-        bbox_embs = {k: np.vstack(v) for k, v in bbox_embs.items()}
+        # extract semantic label features
+        embs = {}
+        for _, obj in query_df.iterrows():
+            label_name = obj['label_name']
+            text_features = extract_text_features(label_name)
+            for k, v in text_features.items():
+                if k not in embs:
+                    embs[k] = []
+                embs[k].append(v)
+        embs = {k: np.vstack(v) for k, v in embs.items()}
+
+        # extract image features
+        # bbox_embs = {}
+        # rgb_path = f'{data_path}/rgb/step{step}.png'
+        # rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
+        # for _, obj in query_df.iterrows():
+        #     top, left, w, h = int(obj['bbox_y0']), int(obj['bbox_x0']), int(obj['bbox_w']), int(obj['bbox_h'])
+        #     crop_img = rgb_img[top:top + h, left:left + w, :]
+        #     features = extract_multimodal_features(crop_img, obj['label_name'])
+        #     for k, v in features.items():
+        #         if k not in bbox_embs:
+        #             bbox_embs[k] = []
+        #         bbox_embs[k].append(v)
+        # bbox_embs = {k: np.vstack(v) for k, v in bbox_embs.items()}
 
         features = {
-            **{k: np.asarray(v).reshape(-1, 1) for k, v in obj_df.items()},
-            **{f'bbox_{k}': v for k, v in bbox_embs.items()}
+            **{k: np.asarray(v).reshape(-1, 1) for k, v in query_df.items()},
+            **{f'{k}_embs': v for k, v in embs.items()},
         }
 
-        node_ids = obj_df.index.to_list()
+        node_ids = query_df.index.to_list()
         edge_index = np.array([[i, j] for i in node_ids for j in node_ids if i != j]).T
-        inst_ids = obj_df['inst_id'].to_list()
+        inst_ids = query_df['inst_id'].to_list()
         inst2node = {inst_id: node_id for node_id, inst_id in enumerate(inst_ids)}
 
         data_dict = {
@@ -231,7 +355,7 @@ class Graph:
             'inst_ids': inst_ids,
             'inst2node': inst2node,
             'features': features,
-            'total_obj_cnt': len(obj_df),
+            'total_obj_cnt': len(query_df),
             'step': f.step,
             'camera_pose': cap.camera_pose,
             'camera_intrinsics': cap.projectionMatrix,
@@ -320,10 +444,6 @@ if __name__ == '__main__':
     parser.add_argument('--move',
                         action='store_true',
                         help='move files instead of copying')
-    parser.add_argument('--output_dir',
-                        type=str,
-                        default='data',
-                        help='name of the reorganized output directory')
     parser.add_argument('--skip_single_graph',
                         action='store_true',
                         help='skip single graph generation')
@@ -362,17 +482,28 @@ if __name__ == '__main__':
             shutil.rmtree(SINGLE_GRAPH_PATH)
         os.mkdir(SINGLE_GRAPH_PATH)
 
-        solo = Solo(args.path, args.output_dir, is_reorganized=(not args.not_reorganized), move=args.move)
+        solo = Solo(args.path, is_reorganized=(not args.not_reorganized), move=args.move)
 
         model, vis_processors, txt_processors = load_model_and_preprocess(
             name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
+
+        is_first = True
         for f in tqdm(solo.frames()):
-            graph = Graph(f, solo, min_bbox_size=args.min_bbox_size, drop_no_instance=(not args.keep_no_instance))
-            if not graph.valid and not args.keep_no_instance:
+            # map graph
+            # if is_first:
+            #     is_first = False
+            #     map_graph = MapGraph(f, solo)
+            #     map_graph_path = os.path.join(SINGLE_GRAPH_PATH, f'map.pkl')
+            #     pkl.dump(map_graph, open(map_graph_path, 'wb'))
+
+            # query graph
+            query_graph = QueryGraph(f, solo, min_bbox_size=args.min_bbox_size,
+                                     drop_no_instance=(not args.keep_no_instance))
+            if not query_graph.valid and not args.keep_no_instance:
                 print(f'step {f.step} is invalid')
                 continue
-            graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
-            pkl.dump(graph, open(graph_path, 'wb'))
+            query_graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
+            pkl.dump(query_graph, open(query_graph_path, 'wb'))
 
     # paired graph
     if not args.keep_non_overlap_graph:
@@ -405,10 +536,6 @@ if __name__ == '__main__':
             if args.keep_non_overlap_graph:
                 pkl.dump(pg, open(non_overlap_paired_graph_path, 'wb'))
             else:
-                # if num_overlap < 1 or num_edges < 1:
-                #     continue
-                # if num_overlap < 4:
-                #     continue
                 if num_overlap < args.min_overlap:
                     continue
                 pkl.dump(pg, open(paired_graph_path, 'wb'))

@@ -8,7 +8,7 @@ from eva import compute_corr
 
 
 def read_img(step, data_dir, type='sem_seg'):
-    return cv2.cvtColor(cv2.imread(f'{data_dir}/data/{type}/step{step}.png'), cv2.COLOR_BGR2RGB)
+    return cv2.cvtColor(cv2.imread(f'{data_dir}/{type}/step{step}.png'), cv2.COLOR_BGR2RGB)
 
 
 def read_graph(step, data_dir):

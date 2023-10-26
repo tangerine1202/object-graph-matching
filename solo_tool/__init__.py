@@ -20,10 +20,8 @@ from .metric import Metric, GenericMetric
 
 
 class Solo():
-    def __init__(self, path, output_dir='data', is_reorganized=True, move=False):
+    def __init__(self, path, is_reorganized=True, move=False):
         self.path = path
-        self.output_dir = output_dir
-        self.output_path = os.path.join(self.path, self.output_dir)
         self.metadata = json.load(open(os.path.join(path, 'metadata.json')))
         self.metric_definitions = json.load(open(os.path.join(path, 'metric_definitions.json')))
         self.sensor_definitions = json.load(open(os.path.join(path, 'sensor_definitions.json')))
@@ -41,32 +39,29 @@ class Solo():
             'rgb': 'camera.png',
             'meta': 'frame_data.json',
         }
+
         if not is_reorganized:
             self.reorganize(move=move)
 
     def reorganize(self, move=False):
-        if os.path.exists(self.output_path):
-            warnings.warn(f'{self.output_path} already exists')
-        os.makedirs(self.output_path, exist_ok=True)
-
         for abbr in self.abbr2suffix.keys():
-            os.makedirs(os.path.join(self.output_path, abbr), exist_ok=True)
+            os.makedirs(os.path.join(self.path, abbr), exist_ok=True)
 
         try:
             for seq_idx in range(self.num_sequences):
                 seq_name = self._get_sequence_name(seq_idx)
                 seq_path = os.path.join(self.path, seq_name)
                 # get all frame paths
-                file_paths = {
+                abbr_filepaths = {
                     abbr: glob.glob(os.path.join(seq_path, f'*.{suffix}')) for abbr, suffix in self.abbr2suffix.items()
                 }
                 # save to output dir
-                for abbr, paths in file_paths.items():
+                for abbr, paths in abbr_filepaths.items():
                     for path in paths:
                         step = os.path.basename(path).split('.')[0]
                         ext = os.path.basename(path).split('.')[-1]
                         filename = f'{step}.{ext}'
-                        new_path = os.path.join(self.output_path, abbr, filename)
+                        new_path = os.path.join(self.path, abbr, filename)
                         if move:
                             shutil.move(path, new_path)
                         else:
@@ -74,7 +69,7 @@ class Solo():
         except Exception as e:
             warnings.warn(f'Error in reorganizing {seq_name}.')
             if move:
-                warnings.warn(f'Files moved to {self.output_path} may be incomplete. Please check.')
+                warnings.warn(f'Files moved to {self.path} may be incomplete. Please check.')
             raise e
 
     def _get_sequence_name(self, sequence_idx):
@@ -99,7 +94,7 @@ class Solo():
     def frames(self):
         for step_idx in range(self.num_frames):
             filename = f'step{step_idx}'
-            yield Frame(self.output_path, filename, self.abbr2suffix)
+            yield Frame(self.path, filename, self.abbr2suffix)
 
     def __len__(self):
         return self.num_frames
@@ -141,7 +136,7 @@ if __name__ == '__main__':
     parser.add_argument('--move', action='store_true', help='move files instead of copying')
     args = parser.parse_args()
 
-    solo = Solo(args.path, args.output_dir, is_reorganized=args.reorganized, move=args.move)
+    solo = Solo(args.path, is_reorganized=args.reorganized, move=args.move)
 
     for f in solo.frames():
         cap = f.captures[0]

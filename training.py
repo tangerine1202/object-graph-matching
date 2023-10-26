@@ -26,22 +26,26 @@ import networkx as nx
 import matplotlib.pyplot as plt
 
 # %%
-from solo2graph import Graph, PairedGraph
+from solo2graph import QueryGraph, PairedGraph
 from dataset import CustomDataset, transform_data
 from models import CustomModel
 from losses import CustomCriterion
-from eva import compute_eval
+from eva import compute_eval, compute_corr
+from viz_utils import read_img, viz_corr
 
 # %%
 
 EPOCHS = 500
 EVAL_EPOCHS = 20
+EMB_DIM = 128
+MATCH_THRESHOLD = 0.2
 
-SOLO_NAME = 'poisson3r8'
+SOLO_NAME = 'poisson1_5r16'
 SCENE = 'SimpleOffice'
 # SOLO_NAME = 'D_pois3r8'
 # SCENE = 'WP16'
-DATA_DIR = f'data/{SCENE}/{SOLO_NAME}/paired_graph'
+DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
+GRAPH_DIR = f'{DATA_DIR}/paired_graph'
 CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}'
 if not os.path.exists(CKPT_DIR):
     os.makedirs(CKPT_DIR)
@@ -50,44 +54,21 @@ if not os.path.exists(CKPT_DIR):
 #
 
 # %%
-ds = CustomDataset(root=DATA_DIR, transform=transform_data)
+ds = CustomDataset(root=GRAPH_DIR, transform=transform_data, max_len=1)
 dl = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, pin_memory=False, drop_last=True)
 dc = next(iter(dl))
 
 # %%
-# dc.keys()
+for attr_name, attr in {k: v for k, v in dc.items() if k.startswith('node_')}.items():
+    print(f'{attr_name} dim: {attr.shape[2]}')
 
-# %%
-# ds = CustomDataset(root=DATA_DIR, scene=SCENE)
-# ds[0]['node_df'].columns
-
-# %%
-# # e1is = []
-# len_e2 = []
-# for dc in iter(dl):
-#   e1is.append(len(dc['e1i'][0]))
-#   len_e2.append(len(dc['e2i'][0]) + len(dc['e2j'][0]))
-
-# len_e2 = np.array(len_e2)
-# for k in [1, 3, 5]:
-#   p_rand = np.clip(1 - (len_e2 - k) / len_e2, 0, 1)
-#   print(f'rand hits@{k}: {p_rand.mean():.4f}, {p_rand.std():.4f}')
-
-# %%
-node_attr_dim = 1  # dc['node_attr'].shape[2]
-# node_visual_dim = dc['bbox_embs'].shape[2]
 edge_attr_dim = dc['edge_attr'].shape[2]
-emb_dim = 128
-
-print(f'node attr dim: {node_attr_dim}')
-# print(f'node visual dim: {node_visual_dim}')
-print(f'edge attr dim: {edge_attr_dim}')
-print(f'emb dim: {emb_dim}')
+print(f'edge_attr dim: {edge_attr_dim}')
 
 # %%
-ds = CustomDataset(root=DATA_DIR, transform=transform_data)
+ds = CustomDataset(root=GRAPH_DIR, transform=transform_data, max_len=5000, min_overlap=3)
 # random select 1000 samples from ds
-# ds = torch.utils.data.Subset(ds, np.random.choice(len(ds), 1000, replace=False))
+ds = torch.utils.data.Subset(ds, np.random.choice(len(ds), 5000, replace=False))
 train_ds, eval_ds, test_ds = torch.utils.data.random_split(ds, [0.5, 0.2, 0.3])
 # # # train_ds = torch.utils.data.Subset(train_ds, [0])  # for debugging
 
@@ -137,9 +118,9 @@ def eval_step(model, data_dict, criterion):
 
 
 # %%
-model = CustomModel(node_attr_dim, edge_attr_dim, emb_dim, match_threshold=0.2).to(device)
+model = CustomModel(edge_attr_dim, EMB_DIM, match_threshold=MATCH_THRESHOLD).to(device)
 criterion = CustomCriterion(device)
-optimizer = optim.Adam(model.parameters(), lr=5e-4)
+optimizer = optim.AdamW(model.parameters(), lr=5e-4, amsgrad=True)
 
 e = 0
 history = {'train_loss': [], 'eval_loss': [], 'eval_metrics': []}
@@ -189,34 +170,37 @@ for _ in tqdm(range(EPOCHS)):
             print(f'{k}: {v:.4f}')
         print()
 
-plt.plot(history['train_loss'], label='train loss')
-plt.plot(history['eval_loss'], label='eval loss')
-plt.legend()
-plt.figure()
-for k, v in history['eval_metrics'][0].items():
-    plt.plot([x[k] for x in history['eval_metrics']], label=f'eval {k}')
-plt.legend()
-plt.show()
+# plt.plot(history['train_loss'], label='train loss')
+# plt.plot(history['eval_loss'], label='eval loss')
+# plt.legend()
+# plt.figure()
+# for k, v in history['eval_metrics'][0].items():
+#     plt.plot([x[k] for x in history['eval_metrics']], label=f'eval {k}')
+# plt.legend()
+# plt.show()
 
 # %%
 mean_metrics = {}
 sum_test_loss = 0
 gid2pred = {}
 
+cnt = 0
 with torch.no_grad():
     model.eval()
     for data_dict in tqdm(test_dl):
         test_loss, metrics = eval_step(model, data_dict, criterion)
-        sum_test_loss += test_loss
 
+        cnt += 1
         pred_dict = model(data_dict)
+        sum_test_loss += test_loss
 
         g1_step = data_dict['g1_step'][0].item()
         if g1_step not in gid2pred:
-            gid2pred[g1_step] = {'pred': [pred_dict], 'data': [data_dict]}
+            gid2pred[g1_step] = {'pred': [pred_dict], 'data': [data_dict], 'eva': [metrics]}
         else:
             gid2pred[g1_step]['pred'].append(pred_dict)
             gid2pred[g1_step]['data'].append(data_dict)
+            gid2pred[g1_step]['eva'].append(metrics)
 
         for k, v in metrics.items():
             if k in mean_metrics:
@@ -226,9 +210,9 @@ with torch.no_grad():
 
 
 for k, v in mean_metrics.items():
-    mean_metrics[k] = v / len(test_dl)
+    mean_metrics[k] = v / cnt  # len(test_dl)
 
-mean_test_loss = sum_test_loss / len(test_dl)
+mean_test_loss = sum_test_loss / cnt  # len(test_dl)
 print(f'mean_test loss: {mean_test_loss:.4f}')
 print('test metrics:')
 for k, v in mean_metrics.items():
@@ -240,8 +224,9 @@ res = []
 for gid, v in gid2pred.items():
     g1_pose = v['data'][0]['g1_camera_pose'][0]
     g1_step = v['data'][0]['g1_step'][0].item()
+    g2_step = v['data'][0]['g2_step'][0].item()
 
-    pred = []
+    preds = []
 
     gt_pose = None
     gt_step = -1
@@ -256,6 +241,8 @@ for gid, v in gid2pred.items():
         g1_step = data_dict['g1_step'][0].item()
         g2_pose = data_dict['g2_camera_pose'][0].cpu()
         g2_step = data_dict['g2_step'][0].item()
+        pos_loss = np.linalg.norm(g1_pose[:3] - g2_pose[:3]).item()
+        q_loss = np.linalg.norm(g1_pose[3:] - g2_pose[3:]).item()
 
         # pred
         match_mask = (pred_dict['matches0'] != -1)
@@ -263,13 +250,19 @@ for gid, v in gid2pred.items():
             score = -np.inf
             continue
         else:
-            match_score = pred_dict['matching_scores0'][match_mask].sort(descending=True)[0]
+            match_score = pred_dict['matching_scores0'][match_mask].sort(descending=True)[0][:3]
             score = torch.mean(match_score).item()
-        pred.append((g2_step, score, g2_pose.numpy()))
+        preds.append({
+            'pred': pred_dict,
+            'data': data_dict,
+            'score': score,
+            'g2_step': g2_step,
+            'g2_pose': g2_pose,
+            'pos_loss': pos_loss,
+            'q_loss': q_loss,
+        })
 
         # gt
-        pos_loss = np.linalg.norm(g1_pose[:3] - g2_pose[:3]).item()
-        q_loss = np.linalg.norm(g1_pose[3:] - g2_pose[3:]).item()
         if pos_loss < gt_pos_loss:
             gt_pos_loss = pos_loss
             gt_q_loss = q_loss
@@ -281,7 +274,7 @@ for gid, v in gid2pred.items():
             gt_pose = g2_pose.numpy()
             gt_step = g2_step
 
-    pred = sorted(pred, key=lambda x: x[1], reverse=True)
+    preds = sorted(preds, key=lambda x: x['score'], reverse=True)
 
     # print(f'g1_step: {g1_step}')
     # print(f'gt_step: {gt_step}')
@@ -291,109 +284,23 @@ for gid, v in gid2pred.items():
         'g1_step': g1_step,
         'gt_step': gt_step,
         'gt_pose': gt_pose,
-        'pred': pred,
+        'preds': preds,
     })
 
 
 def compute_hits_at_k(gt, pred, k):
-    gt_pose = gt
     for i in range(min(len(pred), k)):
-        if np.allclose(gt_pose, pred[i][2]) and i < k:
+        if np.allclose(pred[i]['pos_loss'], 0):
             return True
     return False
 
 
 res = sorted(res, key=lambda x: x['g1_step'])
 
-mean_len_of_pred = np.mean([len(d['pred']) for d in res])
-std_len_of_pred = np.std([len(d['pred']) for d in res])
-max_len_of_pred = np.max([len(d['pred']) for d in res])
+mean_len_of_pred = np.mean([len(d['preds']) for d in res])
+std_len_of_pred = np.std([len(d['preds']) for d in res])
+max_len_of_pred = np.max([len(d['preds']) for d in res])
 print(f'mean_len_of_pred: {mean_len_of_pred:.4f}')
 print(f'std_len_of_pred: {std_len_of_pred:.4f}')
 print(f'max_len_of_pred: {max_len_of_pred:.4f}')
 print()
-
-n_data = len(res)
-n_no_match = sum([len(d['pred']) == 0 for d in res])
-n_has_match = n_data - n_no_match
-n_hits_at_1 = sum([compute_hits_at_k(d['gt_pose'], d['pred'], 1) for d in res])
-n_hits_at_3 = sum([compute_hits_at_k(d['gt_pose'], d['pred'], 3) for d in res])
-n_hits_at_5 = sum([compute_hits_at_k(d['gt_pose'], d['pred'], 5) for d in res])
-n_hits_at_10 = sum([compute_hits_at_k(d['gt_pose'], d['pred'], 10) for d in res])
-print(f'data len: {n_data}')
-print(f'num of has , no matches: {n_has_match} , {n_no_match}')
-print(f'hits@1: {n_hits_at_1 / (n_has_match if n_has_match > 0 else 1) * 100:.4f}%')
-print(f'hits@3: {n_hits_at_3 / (n_has_match if n_has_match > 0 else 1) * 100:.4f}%')
-print(f'hits@5: {n_hits_at_5 / (n_has_match if n_has_match > 0 else 1) * 100:.4f}%')
-print(f'hits@10: {n_hits_at_10 / (n_has_match if n_has_match > 0 else 1) * 100:.4f}%')
-
-
-# %%
-# data_dict = list(iter(test_dl))[10]
-# pred_dict = model(data_dict)
-# cam_pose = data_dict['g1_camera_pose']
-
-# with torch.no_grad():
-#     metrics = compute_eval(pred_dict, data_dict)
-#     for k, v in metrics.items():
-#         if type(v) == torch.Tensor:
-#             metrics[k] = v.item()
-# pprint(metrics)
-
-# # %%
-# # turn e1i and e1j into numpy array
-# e1i = data_dict['e1i'].squeeze(0).numpy()
-# e1j = data_dict['e1j'].squeeze(0).numpy()
-# e2i = data_dict['e2i'].squeeze(0).numpy() - data_dict['g1_node_count'].item()
-# e2j = data_dict['e2j'].squeeze(0).numpy() - data_dict['g2_node_count'].item()
-# e1 = np.concatenate([e1i, e1j])
-# e2 = np.concatenate([e2i, e2j])
-# print('g1 node count', data_dict['g1_node_count'].item())
-# print('g2 node count', data_dict['g2_node_count'].item())
-# print(f'e1i: {e1i.shape}, e2i: {e2i.shape}, e1j: {e1j.shape}, e2j: {e2j.shape}')
-# # print(f'e1: {e1}')
-# # print(f'e2: {e2}')
-
-# # %%
-# gt_match = [[i, j] for i, j in zip(e1i, e2i)]
-# pred_match = [[i, j.item()] for i, j in enumerate(pred_dict['matches0']) if j != -1]
-
-# print(f'gt match:')
-# pprint(gt_match)
-# print(f'pred match:')
-# pprint(pred_match)
-
-# # %%
-# # gt_match = [[i, j] for i, j in zip(e1i, e2i)]
-# # print(f'gt match:')
-# # pprint(gt_match)
-
-# # g1_node_count = data_dict['g1_node_count'][0].detach().cpu().numpy()
-# # emb = pred_dict['joint_embs'].squeeze(0).detach().cpu().numpy()
-# # emb = emb / np.linalg.norm(emb, axis=1)[:, None]
-# # emb1 = emb[:data_dict['g1_node_count']]
-# # emb2 = emb[data_dict['g1_node_count']:]
-# # W = emb1 @ emb2.T
-# # corr_ids = np.argmax(W, axis=1) + g1_node_count
-
-# # G = nx.Graph()
-# # for i in range(W.shape[0]):
-# #     for j in range(W.shape[1]):
-# #         G.add_edge(i, j + g1_node_count, weight=W[i, j])
-
-# # match = nx.bipartite.minimum_weight_full_matching(G, corr_ids)
-# # match = [[i, j] for i, j in match.items() if i < data_dict['g1_node_count'].item()]
-# # print(f'pred match:')
-# # pprint(match)
-
-# # match_G = nx.Graph()
-# # for i in match.keys():
-# #     j = match[i]
-# #     match_G.add_edge(i, j, weight=G[i][j]['weight'])
-# # pos = nx.bipartite_layout(match_G, match.keys())
-# # nx.draw(match_G, pos, node_color='lightblue', with_labels=True, node_size=500)
-
-# # %%
-
-
-# # %%
