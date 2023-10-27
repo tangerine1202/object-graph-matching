@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torchvision.transforms.functional as VF
-from torch.utils.data import Dataset
 from torch_geometric.data import Dataset
 
 from solo2graph import QueryGraph, PairedGraph
@@ -18,25 +17,25 @@ class CustomDataset(Dataset):
     def __init__(self, root, transform=None, max_len=None, min_overlap=1):
         self.root = root
         self.transform = transform
-        self.max_len = max_len
         self.file_names = [os.path.basename(name) for name in glob.glob(os.path.join(root, '*.pkl'))]
+        self.max_len = max_len if max_len is not None else len(self.file_names)
         np.random.shuffle(self.file_names)
 
         if min_overlap > 1:
             self.filter_by_overlap(min_overlap=min_overlap)
-        if max_len is not None and len(self.file_names) > max_len:
-            self.file_names = np.random.choice(self.file_names, max_len, replace=False)
+        if len(self.file_names) > self.max_len:
+            self.file_names = np.random.choice(self.file_names, self.max_len, replace=False)
 
     def filter_by_overlap(self, min_overlap=1):
         new_file_names = []
         cnt = 0
-        for name in self.file_names:
+        for name in tqdm(self.file_names, total=self.max_len):
             pg_path = os.path.join(self.root, name)
             pg = pkl.load(open(pg_path, 'rb'))
             if len(pg.e1i) >= min_overlap:
                 new_file_names.append(name)
                 cnt += 1
-            if self.max_len is not None and cnt >= self.max_len:
+            if cnt >= self.max_len:
                 break
         self.file_names = new_file_names
 
