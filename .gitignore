@@ -12,3 +12,4 @@ data/
 ckpt/
 
 seg_match.zip
+dev.ipynb
