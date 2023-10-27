@@ -47,10 +47,10 @@ class CustomModel(nn.Module):
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
+            nn.Conv1d(768, 128, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(128),
             nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
         )
         self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
             (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
