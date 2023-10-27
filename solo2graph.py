@@ -2,7 +2,7 @@ import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 import argparse
 import copy
-from glob import glob
+import glob
 from pprint import pprint
 import pickle as pkl
 import shutil
@@ -80,6 +80,53 @@ def extract_multimodal_features(raw_image, text):
     }
 
 
+def world2local_bbox3d(cam_pose, world_t, world_q, world_s):
+    assert cam_pose.shape == (7,), f'cam_pose shape should be (7, ), but got {cam_pose.shape}'
+    assert world_t.shape[1] == 3, f'world_t shape should be (n, 3), but got {world_t.shape}'
+    assert world_q.shape[1] == 4, f'world_q shape should be (n, 4), but got {world_q.shape}'
+    assert world_s.shape[1] == 3, f'world_s shape should be (n, 3), but got {world_s.shape}'
+    # convert bbox3d from global to local
+    cam_t = cam_pose[:3].reshape(1, 3)  # (1, 3)
+    cam_R = R.from_quat(cam_pose[3:])
+    local_t = cam_R.inv().apply(world_t - cam_t)  # (n, 3)
+    local_r = cam_R.inv() * R.from_quat(world_q)
+    local_s = np.array(world_s)
+    bbox3d_df = pd.DataFrame(np.concatenate((local_t, local_r.as_quat(), local_s), axis=1),
+                             columns=['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz',
+                                      'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw',
+                                      'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'])
+    return bbox3d_df
+
+
+def comp_bbox3d_dist_and_quat(bbox3d_df, xyz_cols):
+    df = bbox3d_df[xyz_cols]
+    cross_df = df.merge(df, how='cross', suffixes=('_src', '_dst'))
+    # distance
+    diff = cross_df[[f'{col}_dst' for col in xyz_cols]].values - \
+        cross_df[[f'{col}_src' for col in xyz_cols]].values  # (n*n, 3)
+    dist = np.linalg.norm(diff, axis=1).reshape(-1, 1)  # (n*n, 1)
+    # quaternion
+    axis = np.cross(cross_df[[f'{col}_src' for col in xyz_cols]].values,
+                    cross_df[[f'{col}_dst' for col in xyz_cols]].values)  # (n*n, 3)
+    axis /= np.linalg.norm(axis, axis=1, keepdims=True)  # (n*n, 3)
+    cos_theta = np.sum(cross_df[[f'{col}_src' for col in xyz_cols]].values *
+                       cross_df[[f'{col}_dst' for col in xyz_cols]].values, axis=1)  # (n*n, )
+    cos_theta /= np.linalg.norm(cross_df[[f'{col}_src' for col in xyz_cols]].values, axis=1) * \
+        np.linalg.norm(cross_df[[f'{col}_dst' for col in xyz_cols]].values, axis=1)  # (n*n, )
+    cos_theta = cos_theta.reshape(-1, 1)  # (n*n, 1)
+    assert np.allclose(cos_theta, np.clip(cos_theta, -1, 1)
+                       ), f'cos_theta out of [-1, 1]: ({cos_theta.min()}, {cos_theta.max()})'
+    cos_theta = np.clip(cos_theta, -1, 1)
+    angle = np.arccos(cos_theta)  # (n*n, 1)
+    half_angle = 0.5 * angle
+    sin_half_angle = np.sin(half_angle)
+    xyz = sin_half_angle * axis
+    w = np.cos(half_angle)
+    res = pd.DataFrame(np.concatenate((dist, xyz, w), axis=1), columns=[
+                       'bbox3d_dist', 'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw'])  # (n*n, 5)
+    return res
+
+
 class MapGraph:
     def __init__(self, f, solo):
         self.data = self.frame_to_data(f, solo)
@@ -92,15 +139,23 @@ class MapGraph:
         self.edge_index = self.data['edge_index']
         self.node_feat = self.data['features']
 
-        self.edge_attr = self.comp_bbox3d_edge_attr()
+        self.edge_attr = {
+            '3d': self.comp_bbox3d_edge_attr(),
+        }
         # self.adj = self.edge_index2adj()
 
     def __len__(self):
         return len(self.node_ids)
 
     def comp_bbox3d_edge_attr(self):
-        # raise NotImplementedError
-        pass
+        cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
+        node_df = pd.DataFrame({k: self.node_feat[k][:, 0] for k in cols})
+        res = comp_bbox3d_dist_and_quat(node_df, cols)
+        edge_attr = res[['bbox3d_dist', 'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw']]
+        # exclude diagonal edges
+        mask = np.eye(len(self.node_ids), dtype=bool).reshape(-1)  # (n*n, 1)
+        edge_attr = edge_attr[~mask].values
+        return edge_attr
 
     def frame_to_data(self, f, solo):
         data_path = solo.path
@@ -194,16 +249,24 @@ class QueryGraph:
         self.edge_index = self.data['edge_index']
         self.node_feat = self.data['features']
 
-        self.edge_attr = self.comp_bbox2d_edge_attr()
-        # self.edge_attr = self.comp_bbox3d_edge_attr()
+        self.edge_attr = {
+            '2d': self.comp_bbox2d_edge_attr(),
+            '3d': self.comp_bbox3d_edge_attr(),
+        }
         # self.adj = self.edge_index2adj()
 
     def __len__(self):
         return len(self.node_ids)
 
     def comp_bbox3d_edge_attr(self):
-        # raise NotImplementedError
-        pass
+        cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
+        node_df = pd.DataFrame({k: self.node_feat[k][:, 0] for k in cols})
+        res = comp_bbox3d_dist_and_quat(node_df, cols)
+        edge_attr = res[['bbox3d_dist', 'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw']]
+        # exclude diagonal edges
+        mask = np.eye(len(self.node_ids), dtype=bool).reshape(-1)  # (n*n, 1)
+        edge_attr = edge_attr[~mask].values
+        return edge_attr
 
     def comp_bbox2d_edge_attr(self):
         cols = ['bbox_cx', 'bbox_cy']
@@ -263,39 +326,27 @@ class QueryGraph:
         query_df = query_df.rename(columns={'object_labelName': 'label_name'})
         query_df['label_id'] = query_df['label_name'].apply(lambda x: anno_defs['instance segmentation'].name2id[x])
 
-        # add columns
-        # def local_bbox3d(cam_pose, world_t, world_q, world_s):
-        #     # convert bbox3d from global to local
-        #     cam_t = cam_pose[:3]
-        #     cam_R = R.from_quat(cam_pose[3:])
-        #     local_t = cam_R.inv().apply(world_t - cam_t)
-        #     local_r = cam_R.inv() * R.from_quat(world_q)
-        #     local_s = world_s
-        #     local_t = pd.DataFrame(local_t, columns=['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz'])
-        #     local_r = pd.DataFrame(local_r.as_quat(), columns=['bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw'])
-        #     local_s = pd.DataFrame(local_s, columns=['bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'])
-        #     return local_t, local_r, local_s
-
-        # world_bbox3d_t_df = query_df['object_translation'].apply(pd.Series).rename(
-        #     columns={0: 'bbox3d_tx', 1: 'bbox3d_ty', 2: 'bbox3d_tz'})
-        # world_bbox3d_q_df = query_df['object_rotation'].apply(pd.Series).rename(
-        #     columns={0: 'bbox3d_qx', 1: 'bbox3d_qy', 2: 'bbox3d_qz', 3: 'bbox3d_qw'})
-        # world_bbox3d_s_df = query_df['object_size'].apply(pd.Series).rename(
-        #     columns={0: 'bbox3d_sx', 1: 'bbox3d_sy', 2: 'bbox3d_sz'})
-        # query_df = query_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
-        # local_bbox3d_t_df, local_bbox3d_q_df, local_bbox3d_s_df = local_bbox3d(
-        #     cap.camera_pose, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df)
-        # query_df = pd.concat((query_df, local_bbox3d_t_df, local_bbox3d_q_df, local_bbox3d_s_df), axis=1)
+        world_bbox3d_t_df = query_df['object_translation'].apply(pd.Series).rename(
+            columns={0: 'w_bbox3d_tx', 1: 'w_bbox3d_ty', 2: 'w_bbox3d_tz'})
+        world_bbox3d_q_df = query_df['object_rotation'].apply(pd.Series).rename(
+            columns={0: 'w_bbox3d_qx', 1: 'w_bbox3d_qy', 2: 'w_bbox3d_qz', 3: 'w_bbox3d_qw'})
+        world_bbox3d_s_df = query_df['object_size'].apply(pd.Series).rename(
+            columns={0: 'w_bbox3d_sx', 1: 'w_bbox3d_sy', 2: 'w_bbox3d_sz'})
+        local_bbox3d_df = world2local_bbox3d(
+            cap.camera_pose, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df)
+        local_bbox3d_df.index = query_df.index
+        query_df = pd.concat((query_df, local_bbox3d_df), axis=1)
 
         # merge annotations
         inst_df_for_merge = inst_df.copy() \
             .drop(columns=['labelName', 'labelId', 'color']) \
-            .add_prefix('inst_') \
-            .rename(columns={'inst_instanceId': 'instanceId'})
+            .add_prefix('inst_')
+        inst_df_for_merge['instanceId'] = inst_df_for_merge['inst_instanceId']
         bbox_df_for_merge = bbox_df.copy() \
             .drop(columns=['labelName', 'labelId']) \
-            .add_prefix('bbox_') \
-            .rename(columns={'bbox_instanceId': 'instanceId'})
+            .add_prefix('bbox_')
+        bbox_df_for_merge['instanceId'] = bbox_df_for_merge['bbox_instanceId']
+        # NOTE: compute bbox3d from world bbox3d
         # bbox3d_df_for_merge = bbox3d_df.copy() \
         #     .drop(columns=['labelName', 'labelId']) \
         #     .add_prefix('bbox3d_') \
@@ -304,12 +355,13 @@ class QueryGraph:
                             right_on='instanceId', suffixes=('', '_duplicated'))
         query_df = pd.merge(query_df, bbox_df_for_merge, how='inner', left_on='instanceId',
                             right_on='instanceId', suffixes=('', '_duplicated'))
+        # NOTE: compute bbox3d from world bbox3d
         # obj_df = pd.merge(obj_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
         #                   right_on='instanceId', suffixes=('', '_duplicated'))
         query_df = query_df.rename(columns={'instanceId': 'inst_id'})
 
         # filter out small object
-        mask = query_df['bbox_w'] * query_df['bbox_h'] > self.min_bbox_size
+        mask = (query_df['bbox_w'] * query_df['bbox_h']) > self.min_bbox_size
         query_df = query_df[mask].reset_index(drop=True)
         if len(query_df) <= 1:
             return False, None
@@ -325,22 +377,8 @@ class QueryGraph:
                 embs[k].append(v)
         embs = {k: np.vstack(v) for k, v in embs.items()}
 
-        # extract image features
-        # bbox_embs = {}
-        # rgb_path = f'{data_path}/rgb/step{step}.png'
-        # rgb_img = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
-        # for _, obj in query_df.iterrows():
-        #     top, left, w, h = int(obj['bbox_y0']), int(obj['bbox_x0']), int(obj['bbox_w']), int(obj['bbox_h'])
-        #     crop_img = rgb_img[top:top + h, left:left + w, :]
-        #     features = extract_multimodal_features(crop_img, obj['label_name'])
-        #     for k, v in features.items():
-        #         if k not in bbox_embs:
-        #             bbox_embs[k] = []
-        #         bbox_embs[k].append(v)
-        # bbox_embs = {k: np.vstack(v) for k, v in bbox_embs.items()}
-
         features = {
-            **{k: np.asarray(v).reshape(-1, 1) for k, v in query_df.items()},
+            **{k: np.array(v).reshape(-1, 1) for k, v in query_df.items()},
             **{f'{k}_embs': v for k, v in embs.items()},
         }
 
@@ -372,55 +410,65 @@ class PairedGraph:
         self.n2 = len(g2)
         self.n = self.n1 + self.n2
 
-        # self.node_attr = np.concatenate([g1.node_attr, g2.node_attr], axis=0)
+        # concat node features
         self.node_feat = {}
-        self.comp_node_feat()
+        for feat_name in self.g1.node_feat.keys():
+            if feat_name not in self.g2.node_feat:
+                # print(f'Warning: {feat_name} not in g2')
+                continue
+            self.node_feat[feat_name] = np.concatenate(
+                [self.g1.node_feat[feat_name], self.g2.node_feat[feat_name]], axis=0)
+
         # edge index
-        self.comp_inter_edge()
+        self.edge_index = np.concatenate([self.g1.edge_index, self.g2.edge_index + self.n1], axis=1)
+        # edge index -- cross graph
+        # self.comp_cross_edge()
         # self.adj = np.zeros((self.n, self.n))
         # self.adj[:self.n1, :self.n1] = self.g1.adj
         # self.adj[self.n1:, self.n1:] = self.g2.adj
         # self.adj[self.n1:, :self.n1] = self.adj_g2tog1
         # self.adj[:self.n1, self.n1:] = self.adj_g1tog2
         # self.edge_index = self.adj2edge_index(self.adj)
-        self.edge_index = np.concatenate([self.g1.edge_index, self.g2.edge_index + self.n1], axis=1)
+
         # edge attr
-        # self.edge_attr = self.comp_edge_attr()
-        self.edge_attr = np.concatenate([self.g1.edge_attr, self.g2.edge_attr], axis=0)
-        assert len(self.edge_attr) == len(self.edge_index[0])
+        self.edge_attr = {}
+        for edge_attr_name in self.g1.edge_attr.keys():
+            if edge_attr_name not in self.g2.edge_attr:
+                # print(f'Warning: {edge_attr_name} not in g2')
+                continue
+            self.edge_attr[edge_attr_name] = np.concatenate(
+                [self.g1.edge_attr[edge_attr_name], self.g2.edge_attr[edge_attr_name]], axis=0)
+        for edge_attr_name in self.edge_attr.keys():
+            assert self.edge_attr[edge_attr_name].shape[0] == self.edge_index.shape[1], \
+                f'{edge_attr_name} shape {self.edge_attr[edge_attr_name].shape} ' \
+                f'does not match edge_index shape {self.edge_index.shape}'
 
-        self.comp_matching()
+        # ground truth matching
+        self.comp_GT_matching()
 
-    def comp_node_feat(self):
-        for name in self.g1.node_feat.keys():
-            self.node_feat[name] = np.concatenate([self.g1.node_feat[name], self.g2.node_feat[name]], axis=0)
+    # def comp_cross_edge(self):
+    #     # compute edge between g1 and g2
+    #     self.edge_g1tog2 = np.array([[g1_node_id, g2_node_id]
+    #                                 for g1_node_id in self.g1.node_ids for g2_node_id in self.g2.node_ids]).T
+    #     self.edge_g2tog1 = np.array([[g2_node_id, g1_node_id]
+    #                                 for g2_node_id in self.g2.node_ids for g1_node_id in self.g1.node_ids]).T
+    #     adj_g1tog2 = np.zeros((len(self.g1), len(self.g2)))
+    #     adj_g2tog1 = np.zeros((len(self.g2), len(self.g1)))
+    #     adj_g1tog2[self.edge_g1tog2[0], self.edge_g1tog2[1]] = 1
+    #     adj_g2tog1[self.edge_g2tog1[0], self.edge_g2tog1[1]] = 1
+    #     # self.adj_g1tog2 = adj_g1tog2
+    #     # self.adj_g2tog1 = adj_g2tog1
 
-    def comp_edge_attr(self):
-        pass
+    # def adj2edge_index(self, adj):
+    #     edge_index = []
+    #     for i in range(adj.shape[0]):
+    #         for j in range(adj.shape[1]):
+    #             if adj[i, j] == 1:
+    #                 edge_index.append([i, j])
+    #     edge_index = np.array(edge_index).T
+    #     return edge_index
 
-    def comp_inter_edge(self):
-        # compute edge between g1 and g2
-        self.edge_g1tog2 = np.array([[g1_node_id, g2_node_id]
-                                    for g1_node_id in self.g1.node_ids for g2_node_id in self.g2.node_ids]).T
-        self.edge_g2tog1 = np.array([[g2_node_id, g1_node_id]
-                                    for g2_node_id in self.g2.node_ids for g1_node_id in self.g1.node_ids]).T
-        adj_g1tog2 = np.zeros((len(self.g1), len(self.g2)))
-        adj_g2tog1 = np.zeros((len(self.g2), len(self.g1)))
-        adj_g1tog2[self.edge_g1tog2[0], self.edge_g1tog2[1]] = 1
-        adj_g2tog1[self.edge_g2tog1[0], self.edge_g2tog1[1]] = 1
-        # self.adj_g1tog2 = adj_g1tog2
-        # self.adj_g2tog1 = adj_g2tog1
-
-    def adj2edge_index(self, adj):
-        edge_index = []
-        for i in range(adj.shape[0]):
-            for j in range(adj.shape[1]):
-                if adj[i, j] == 1:
-                    edge_index.append([i, j])
-        edge_index = np.array(edge_index).T
-        return edge_index
-
-    def comp_matching(self):
+    def comp_GT_matching(self):
         self.all_inst_ids = list(set(self.g1.inst_ids) | set(self.g2.inst_ids))
         self.anchor_inst_ids = list(set(self.g1.inst_ids) & set(self.g2.inst_ids))
         self.e1i = [self.g1.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
@@ -438,51 +486,57 @@ if __name__ == '__main__':
                         type=str,
                         help='path to solo output',
                         required=True)
-    parser.add_argument('--not_reorganized',
+    # rearrange solo
+    parser.add_argument('--rearrange',
                         action='store_true',
-                        help='whether the data has been reorganized')
+                        help='whether to rearrange the output')
     parser.add_argument('--move',
                         action='store_true',
                         help='move files instead of copying')
-    parser.add_argument('--skip_single_graph',
-                        action='store_true',
-                        help='skip single graph generation')
-    parser.add_argument('--single_graph_dir',
+    # graph
+    parser.add_argument('--graph-dir',
                         type=str,
                         default='graph',
                         help='name of the single graph directory')
-    parser.add_argument('--min_bbox_size',
+    parser.add_argument('--skip-graph-gen',
+                        action='store_true',
+                        help='skip single graph generation')
+    parser.add_argument('--min-bbox-size',
                         type=int,
                         default=0,
                         help='minimum bbox size to be included in the graph')
-    parser.add_argument('--keep_no_instance',
+    parser.add_argument('--keep-no-instance',
                         action='store_true',
                         help='skip frames with no instance')
 
-    parser.add_argument('--paired_graph_dir',
-                        type=str,
-                        default='paired_graph',
-                        help='name of the paired graph directory')
-    parser.add_argument('--min_overlap',
-                        type=int,
-                        default=1,
-                        help='minimum number of overlap instances')
-    parser.add_argument('--keep_non_overlap_graph',
+    # map graph
+    parser.add_argument('--no-q2q',
                         action='store_true',
-                        help='keep non-overlap graph generation')
+                        help='whether to use query to query graph')
+    parser.add_argument('--no-m2q',
+                        action='store_true',
+                        help='whether to use query to query graph')
+    parser.add_argument('--map-filename',
+                        type=str,
+                        default='map',
+                        help='name of the map graph file')
+
+    # paired graph
+    parser.add_argument('--pair-file-name',
+                        type=str,
+                        default='paired_list.csv',
+                        help='name of the list of paired graph')
     args = parser.parse_args()
 
-    SINGLE_GRAPH_PATH = os.path.join(args.path, args.single_graph_dir)
-    PAIRED_GRAPH_PATH = os.path.join(args.path, args.paired_graph_dir)
-    NON_OVERLAP_GRAPH_PATH = os.path.join(args.path, f'all_{args.paired_graph_dir}')
+    GRAPH_PATH = os.path.join(args.path, args.graph_dir)
 
-    if not args.skip_single_graph:
-        if os.path.exists(SINGLE_GRAPH_PATH):
-            print(f'remove {SINGLE_GRAPH_PATH}')
-            shutil.rmtree(SINGLE_GRAPH_PATH)
-        os.mkdir(SINGLE_GRAPH_PATH)
+    if not args.skip_graph_gen:
+        if os.path.exists(GRAPH_PATH):
+            print(f'remove {GRAPH_PATH}')
+            shutil.rmtree(GRAPH_PATH)
+        os.mkdir(GRAPH_PATH)
 
-        solo = Solo(args.path, is_reorganized=(not args.not_reorganized), move=args.move)
+        solo = Solo(args.path, is_reorganized=args.rearrange, move=args.move)
 
         model, vis_processors, txt_processors = load_model_and_preprocess(
             name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
@@ -490,11 +544,11 @@ if __name__ == '__main__':
         is_first = True
         for f in tqdm(solo.frames()):
             # map graph
-            # if is_first:
-            #     is_first = False
-            #     map_graph = MapGraph(f, solo)
-            #     map_graph_path = os.path.join(SINGLE_GRAPH_PATH, f'map.pkl')
-            #     pkl.dump(map_graph, open(map_graph_path, 'wb'))
+            if is_first:
+                is_first = False
+                map_graph = MapGraph(f, solo)
+                map_graph_path = os.path.join(GRAPH_PATH, f'{args.map_filename}.pkl')
+                pkl.dump(map_graph, open(map_graph_path, 'wb'))
 
             # query graph
             query_graph = QueryGraph(f, solo, min_bbox_size=args.min_bbox_size,
@@ -502,40 +556,39 @@ if __name__ == '__main__':
             if not query_graph.valid and not args.keep_no_instance:
                 print(f'step {f.step} is invalid')
                 continue
-            query_graph_path = os.path.join(SINGLE_GRAPH_PATH, f'step{f.step}.pkl')
+            query_graph_path = os.path.join(GRAPH_PATH, f'step{f.step}.pkl')
             pkl.dump(query_graph, open(query_graph_path, 'wb'))
 
     # paired graph
-    if not args.keep_non_overlap_graph:
-        if os.path.exists(PAIRED_GRAPH_PATH):
-            print(f'remove {PAIRED_GRAPH_PATH}')
-            shutil.rmtree(PAIRED_GRAPH_PATH)
-        os.mkdir(PAIRED_GRAPH_PATH)
-    else:
-        if os.path.exists(NON_OVERLAP_GRAPH_PATH):
-            print(f'remove {NON_OVERLAP_GRAPH_PATH}')
-            shutil.rmtree(NON_OVERLAP_GRAPH_PATH)
-        os.mkdir(NON_OVERLAP_GRAPH_PATH)
+    if not args.no_q2q:
+        PAIR_FILE_NAME = f'qq_{args.pair_file_name}'
+        query_fnames = [os.path.basename(name) for name in glob.glob(os.path.join(GRAPH_PATH, '*.pkl'))]
+        paired_df = pd.DataFrame(columns=['g1_fname', 'g2_fname', 'n_overlap'])
+        for i in tqdm(range(len(query_fnames))):
+            for j in range(i + 1, len(query_fnames)):
+                g1_fname = query_fnames[i]
+                g2_fname = query_fnames[j]
+                g1 = pkl.load(open(os.path.join(GRAPH_PATH, g1_fname), 'rb'))
+                g2 = pkl.load(open(os.path.join(GRAPH_PATH, g2_fname), 'rb'))
+                paired_graph = PairedGraph(g1, g2)
+                n_overlap = len(paired_graph.e1i)
+                paired_df = pd.concat((paired_df, pd.DataFrame({'g1_fname': g1_fname,
+                                                                'g2_fname': g2_fname,
+                                                                'n_overlap': n_overlap}, index=[0])), ignore_index=True)
+        paired_df.to_csv(os.path.join(args.path, PAIR_FILE_NAME), index=False)
+    if not args.no_m2q:
+        PAIR_FILE_NAME = f'mq_{args.pair_file_name}'
+        map_fname = f'{args.map_filename}.pkl'
+        query_fnames = [
+            os.path.basename(name) for name in glob.glob(os.path.join(GRAPH_PATH, '*.pkl')) if map_fname not in name]
 
-    paths = glob(os.path.join(SINGLE_GRAPH_PATH, '*.pkl'))
-    for p1 in tqdm(paths):
-        for p2 in paths:
-            if p1 == p2:
-                continue
-            g1 = pkl.load(open(p1, 'rb'))
-            g2 = pkl.load(open(p2, 'rb'))
-            fname1 = os.path.basename(p1).split('.')[0]
-            fname2 = os.path.basename(p2).split('.')[0]
-            paired_graph_path = os.path.join(PAIRED_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
-            non_overlap_paired_graph_path = os.path.join(NON_OVERLAP_GRAPH_PATH, f'{fname1}_{fname2}.pkl')
-
-            pg = PairedGraph(g1, g2)
-            num_overlap = len(pg.e1i)
-            num_edges = len(pg.edge_index.T)
-
-            if args.keep_non_overlap_graph:
-                pkl.dump(pg, open(non_overlap_paired_graph_path, 'wb'))
-            else:
-                if num_overlap < args.min_overlap:
-                    continue
-                pkl.dump(pg, open(paired_graph_path, 'wb'))
+        paired_df = pd.DataFrame(columns=['g1_fname', 'g2_fname', 'n_overlap'])
+        map_graph = pkl.load(open(os.path.join(GRAPH_PATH, map_fname), 'rb'))
+        for query_fname in tqdm(query_fnames):
+            query_graph = pkl.load(open(os.path.join(GRAPH_PATH, query_fname), 'rb'))
+            paired_graph = PairedGraph(map_graph, query_graph)
+            n_overlap = len(paired_graph.e1i)
+            paired_df = pd.concat((paired_df, pd.DataFrame({'g1_fname': map_fname,
+                                                            'g2_fname': query_fname,
+                                                            'n_overlap': n_overlap}, index=[0])), ignore_index=True)
+        paired_df.to_csv(os.path.join(args.path, PAIR_FILE_NAME), index=False)
