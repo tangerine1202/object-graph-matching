@@ -27,11 +27,11 @@ class PairListDataset(Dataset):
         self.pair_df = self.pair_df[self.pair_df['n_overlap'] >= min_overlap]
 
     def __getitem__(self, idx):
-        g1_fname = self.pair_df.iloc[idx]['g1_fname']
-        g2_fname = self.pair_df.iloc[idx]['g2_fname']
-        g1_graph = pkl.load(open(os.path.join(self.graph_root, g1_fname), 'rb'))
-        g2_graph = pkl.load(open(os.path.join(self.graph_root, g2_fname), 'rb'))
-        paired_graph = PairedGraph(g1_graph, g2_graph)
+        qry_fname = self.pair_df.iloc[idx]['qry_fname']
+        map_fname = self.pair_df.iloc[idx]['map_fname']
+        qry_graph = pkl.load(open(os.path.join(self.graph_root, qry_fname), 'rb'))
+        map_graph = pkl.load(open(os.path.join(self.graph_root, map_fname), 'rb'))
+        paired_graph = PairedGraph(qry_graph, map_graph)
         if self.transform:
             paired_graph = self.transform(paired_graph)
         return paired_graph
@@ -43,10 +43,10 @@ class PairListDataset(Dataset):
     def len(self): pass
 
 
-def transform_3D_mq_data(pg):
+def transform_3D_qm_data(pg):
     data = {}
-    mg = pg.g1
-    qg = pg.g2
+    qry_g = pg.g1
+    map_g = pg.g2
 
     # node attr
     data['node_bbox3d'] = torch.cat((
@@ -66,7 +66,7 @@ def transform_3D_mq_data(pg):
     data['node_norm_text'] = torch.tensor(pg.node_feat['norm_text_embs'], dtype=torch.float)
 
     # edge attr
-    data['edge_index'] = torch.tensor(pg.edge_index, dtype=torch.long)
+    data['edge_index'] = torch.tensor(pg.edge_index['3d'], dtype=torch.long)
     # edge index
     data['edge_attr'] = torch.tensor(pg.edge_attr['3d'], dtype=torch.float)
 
@@ -77,14 +77,16 @@ def transform_3D_mq_data(pg):
     data['e1j'] = torch.tensor(pg.e1j, dtype=torch.long)
     data['e2j'] = torch.tensor(pg.e2j, dtype=torch.long)
 
-    data['query_step'] = torch.tensor(qg.step, dtype=torch.long)
-    data['query_camera_pose'] = torch.tensor(qg.camera_pose, dtype=torch.float)
-    data['query_camera_intrinsics'] = torch.tensor(qg.camera_intrinsics, dtype=torch.float)
+    data['qry_step'] = torch.tensor(qry_g.step, dtype=torch.long)
+    data['qry_camera_pose'] = torch.tensor(qry_g.camera_pose, dtype=torch.float)
+    data['qry_camera_intrinsics'] = torch.tensor(qry_g.camera_intrinsics, dtype=torch.float)
     return data
 
 
 def transform_2D_qq_data(pg):
     data = {}
+    qry_g = pg.g1
+    map_g = pg.g2
 
     # node attr
     data['node_position'] = torch.cat((
@@ -103,7 +105,7 @@ def transform_2D_qq_data(pg):
     data['node_norm_text'] = torch.tensor(pg.node_feat['norm_text_embs'], dtype=torch.float)
 
     # edge attr
-    data['edge_index'] = torch.tensor(pg.edge_index, dtype=torch.long)
+    data['edge_index'] = torch.tensor(pg.edge_index['2d'], dtype=torch.long)
     # edge index
     data['edge_attr'] = torch.tensor(pg.edge_attr['2d'], dtype=torch.float)
     data['edge_attr'][:, 0] /= np.sqrt(320)
@@ -115,11 +117,8 @@ def transform_2D_qq_data(pg):
     data['e1j'] = torch.tensor(pg.e1j, dtype=torch.long)
     data['e2j'] = torch.tensor(pg.e2j, dtype=torch.long)
 
-    data['g1_step'] = torch.tensor(pg.g1.step, dtype=torch.long)
-    data['g2_step'] = torch.tensor(pg.g2.step, dtype=torch.long)
-    data['g1_camera_pose'] = torch.tensor(pg.g1.camera_pose, dtype=torch.float)
-    data['g2_camera_pose'] = torch.tensor(pg.g2.camera_pose, dtype=torch.float)
-
-    # data['g1_camera_intrinsics'] = torch.from_numpy(np.asarray(data['g1_camera_intrinsics'], dtype=float))
-    # data['g2_camera_intrinsics'] = torch.from_numpy(np.asarray(data['g2_camera_intrinsics'], dtype=float))
+    data['qry_step'] = torch.tensor(qry_g.step, dtype=torch.long)
+    data['map_step'] = torch.tensor(map_g.step, dtype=torch.long)
+    data['qry_camera_pose'] = torch.tensor(qry_g.camera_pose, dtype=torch.float)
+    data['map_camera_pose'] = torch.tensor(map_g.camera_pose, dtype=torch.float)
     return data

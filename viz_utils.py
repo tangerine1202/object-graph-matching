@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import cv2
+from solo2graph import MapGraph, QueryGraph, PairedGraph
 
 from eva import compute_corr
 
@@ -39,36 +40,36 @@ def viz_corr(
         return cv2.rectangle(img, (bbox_xywh[0], bbox_xywh[1]), (bbox_xywh[0] + bbox_xywh[2], bbox_xywh[1] + bbox_xywh[3]), color, thickness)
 
     tp_corr, fp_corr, fn_corr, gt_corr = compute_corr(pred_dict, data_dict)
-    g1_step = data_dict['g1_step'].item()
-    g2_step = data_dict['g2_step'].item()
-    g1_img = read_img(g1_step, data_dir, img_type)
-    g2_img = read_img(g2_step, data_dir, img_type)
+    qry_step = data_dict['qry_step'].item()
+    amp_step = data_dict['map_step'].item()
+    qry_img = read_img(qry_step, data_dir, img_type)
+    map_img = read_img(amp_step, data_dir, img_type)
     pad_px = 10
-    img = concat_imgs([g1_img, g2_img], pad_px=pad_px)
+    img = concat_imgs([qry_img, map_img], pad_px=pad_px)
 
-    g1_g = read_graph(g1_step, data_dir)
-    g2_g = read_graph(g2_step, data_dir)
-    g1_bbox = pd.DataFrame({k: g1_g.node_feat[k].squeeze(1) for k in ['bbox_cx', 'bbox_cy', 'bbox_w', 'bbox_h']})
-    g2_bbox = pd.DataFrame({k: g2_g.node_feat[k].squeeze(1) for k in ['bbox_cx', 'bbox_cy', 'bbox_w', 'bbox_h']})
-    g1_bbox['bbox_x'] = g1_bbox['bbox_cx'] - g1_bbox['bbox_w'] / 2
-    g1_bbox['bbox_y'] = g1_bbox['bbox_cy'] - g1_bbox['bbox_h'] / 2
-    g2_bbox['bbox_x'] = g2_bbox['bbox_cx'] - g2_bbox['bbox_w'] / 2
-    g2_bbox['bbox_y'] = g2_bbox['bbox_cy'] - g2_bbox['bbox_h'] / 2
+    qry_g = read_graph(qry_step, data_dir)
+    map_g = read_graph(amp_step, data_dir)
+    qry_bbox = pd.DataFrame({k: qry_g.node_feat[k].squeeze(1) for k in ['bbox_cx', 'bbox_cy', 'bbox_w', 'bbox_h']})
+    map_bbox = pd.DataFrame({k: map_g.node_feat[k].squeeze(1) for k in ['bbox_cx', 'bbox_cy', 'bbox_w', 'bbox_h']})
+    qry_bbox['bbox_x'] = qry_bbox['bbox_cx'] - qry_bbox['bbox_w'] / 2
+    qry_bbox['bbox_y'] = qry_bbox['bbox_cy'] - qry_bbox['bbox_h'] / 2
+    map_bbox['bbox_x'] = map_bbox['bbox_cx'] - map_bbox['bbox_w'] / 2
+    map_bbox['bbox_y'] = map_bbox['bbox_cy'] - map_bbox['bbox_h'] / 2
 
-    for i in range(len(g1_g)):
-        bbox1 = g1_bbox[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i]
+    for i in range(len(qry_g)):
+        bbox1 = qry_bbox[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i]
         if i not in tp_corr and i not in fp_corr:  # and i not in fn_corr:
             img = draw_bbox(img, bbox1, color=NON_CORR_COLOR)
-    for i in range(len(g2_g)):
-        bbox2 = g2_bbox[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i]
-        bbox2['bbox_x'] += g1_img.shape[1] + pad_px
+    for i in range(len(map_g)):
+        bbox2 = map_bbox[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i]
+        bbox2['bbox_x'] += qry_img.shape[1] + pad_px
         if i not in tp_corr.values() and i not in fp_corr.values():  # and i not in fn_corr.values():
             img = draw_bbox(img, bbox2, color=NON_CORR_COLOR)
 
     for i, j in fn_corr.items():
-        bbox1 = g1_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
-        bbox2 = g2_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
-        bbox2[['bbox_cx', 'bbox_x']] += g1_img.shape[1] + pad_px
+        bbox1 = qry_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
+        bbox2 = map_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
+        bbox2[['bbox_cx', 'bbox_x']] += qry_img.shape[1] + pad_px
         img = cv2.line(img,
                        (bbox1['bbox_cx'], bbox1['bbox_cy']),
                        (bbox2['bbox_cx'], bbox2['bbox_cy']),
@@ -78,9 +79,9 @@ def viz_corr(
         draw_bbox(img, bbox2[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']], color=FN_CORR_COLOR)
 
     for i, j in tp_corr.items():
-        bbox1 = g1_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
-        bbox2 = g2_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
-        bbox2[['bbox_cx', 'bbox_x']] += g1_img.shape[1] + pad_px
+        bbox1 = qry_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
+        bbox2 = map_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
+        bbox2[['bbox_cx', 'bbox_x']] += qry_img.shape[1] + pad_px
         img = cv2.line(img,
                        (bbox1['bbox_cx'], bbox1['bbox_cy']),
                        (bbox2['bbox_cx'], bbox2['bbox_cy']),
@@ -90,9 +91,9 @@ def viz_corr(
         draw_bbox(img, bbox2[['bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']], color=TP_CORR_COLOR)
 
     for i, j in fp_corr.items():
-        bbox1 = g1_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
-        bbox2 = g2_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
-        bbox2[['bbox_cx', 'bbox_x']] += g1_img.shape[1] + pad_px
+        bbox1 = qry_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[i].astype(int)
+        bbox2 = map_bbox[['bbox_cx', 'bbox_cy', 'bbox_x', 'bbox_y', 'bbox_w', 'bbox_h']].iloc[j].astype(int)
+        bbox2[['bbox_cx', 'bbox_x']] += qry_img.shape[1] + pad_px
         img = cv2.line(img,
                        (bbox1['bbox_cx'], bbox1['bbox_cy']),
                        (bbox2['bbox_cx'], bbox2['bbox_cy']),
