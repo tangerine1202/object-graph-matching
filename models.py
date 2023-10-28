@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import torch
 import numpy as np
+from scipy.spatial.transform import Rotation as scipy_R
 from scipy.optimize import minimize as scipy_minimize
 from solo2graph import MapGraph, QueryGraph, PairedGraph
 
@@ -113,13 +114,57 @@ class CustomModel(nn.Module):
         # Get the matches with score above "match_threshold".
         matches = matches_from_scores(scores, self.match_threshold)
 
-        return {
+        pred_dict = {
             'matches0': matches['matches0'],
             'matches1': matches['matches1'],
             'matching_scores0': matches['matching_scores0'],
             'matching_scores1': matches['matching_scores1'],
             'scores': scores,
         }
+
+        if not self.training:
+            # compute pose
+            pred_pose = compute_pose(pred_dict, data_dict)
+            pred_dict['pose'] = pred_pose
+
+        return pred_dict
+
+
+def compute_pose(pred_dict, data_dict):
+    pred_e1i = np.array([idx for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    pred_e2i = np.array([v.item() for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    corrs = np.stack([pred_e1i, pred_e2i], axis=1)  # (n, 2)
+    if len(pred_e1i) == 0:
+        pred_pose, error = None, None
+    else:
+        if isinstance(data_dict['node_bbox3d'], torch.Tensor):
+            bbox3d_t1 = data_dict['node_bbox3d'][0].cpu().numpy()
+            bbox3d_t2 = data_dict['node_bbox3d'][0].cpu().numpy()
+        bbox3d_t1 = bbox3d_t1[:data_dict['n1'].item(), :3]
+        bbox3d_t2 = bbox3d_t2[data_dict['n1'].item():, :3]
+        pred_pose = pose_by_minimize_translation(bbox3d_t1, bbox3d_t2, corrs)
+    return pred_pose
+
+
+def pose_by_minimize_translation(src, tgt, corrs):
+    def icp_cost_function(transformation_flat, src, tgt):
+        transformation = transformation_flat.reshape(4, 4)
+        R, t = transformation[:3, :3], transformation[:3, 3]
+        transformed_src = src @ R.T + t  # (n, 3)
+        error = transformed_src - tgt
+        return np.sum(np.linalg.norm(error, axis=1))
+
+    assert corrs.shape[1] == 2
+    src = src[corrs[:, 0]]
+    tgt = tgt[corrs[:, 1]]
+
+    T_init_flat = np.eye(4).flatten()
+    result = scipy_minimize(icp_cost_function, T_init_flat, args=(src, tgt), method='L-BFGS-B')
+    T = result.x.reshape(4, 4)
+    R, t = scipy_R.from_matrix(T[:3, :3]), T[:3, 3]
+    pose = np.concatenate((t, R.as_quat()))
+    # error = result.fun
+    return pose
 
 
 def matches_from_scores(scores, match_threshold: float):

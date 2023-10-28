@@ -1,6 +1,6 @@
 # %%
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 from pprint import pprint
 import pickle as pkl
 
@@ -30,9 +30,9 @@ import matplotlib.pyplot as plt
 # %%
 from solo2graph import MapGraph, QueryGraph, PairedGraph
 from dataset import PairListDataset, transform_3D_qm_data, transform_2D_qq_data
-from models import CustomModel
+from models import CustomModel, compute_pose
 from losses import CustomCriterion
-from eva import compute_eval
+from eva import compute_eval, compute_corr, compute_confusion_matrix
 from viz_utils import read_img, viz_corr
 
 # %%
@@ -228,3 +228,14 @@ print(f'mean_test loss: {mean_test_loss:.4f}')
 print('test metrics:')
 for k, v in metrics_seq.items():
     print(f'{k:>15}: {np.mean(v):8.4f} ± {np.std(v):8.4f}, median {np.median(v):.4f}')
+
+
+mask_5cm = np.array(metrics_seq['t_rmse']) < 0.05
+mask_10cm = np.array(metrics_seq['t_rmse']) < 0.1
+mask_5deg = np.array(metrics_seq['r_err']) < 5
+mask_10deg = np.array(metrics_seq['r_err']) < 10
+
+mask_5cm5deg = np.logical_and(mask_5cm, mask_5deg)
+mask_10cm5deg = np.logical_and(mask_10cm, mask_5deg)
+print(f'5cm/5deg: {np.sum(mask_5cm5deg) / len(test_ds):.4f}')
+print(f'10cm/5deg: {np.sum(mask_10cm5deg) / len(test_ds):.4f}')
