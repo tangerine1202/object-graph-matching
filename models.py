@@ -113,35 +113,12 @@ class CustomModel(nn.Module):
         # Get the matches with score above "match_threshold".
         matches = matches_from_scores(scores, self.match_threshold)
 
-        # P3P pose estimation
-        # pred_pose0 = None
-        # pred_pose1 = None
-        # if data_dict['g1_node_count'] >= 4 and data_dict['g2_node_count'] >= 4:
-        #     topk_indices0 = torch.topk(matches['matching_scores0'], 4)[1]
-        #     topk_indices1 = torch.topk(matches['matching_scores1'], 4)[1] + data_dict['g1_node_count'].item()
-        #     p2d_0 = data_dict['bbox'][0, topk_indices0, :2]
-        #     p2d_1 = data_dict['bbox'][0, topk_indices1, :2]
-        #     p3d_0 = data_dict['obj_pose_in_W'][0, topk_indices0]
-        #     p3d_1 = data_dict['obj_pose_in_W'][0, topk_indices1]
-        #     pred_pose0 = p3p(p2d_0, p3d_0, data_dict['g1_camera_intrinsics'][0])
-        #     pred_pose1 = p3p(p2d_1, p3d_1, data_dict['g2_camera_intrinsics'][0])
-        #     pred_pose0 = torch.tensor(pred_pose0, dtype=torch.float).unsqueeze(0)
-        #     pred_pose1 = torch.tensor(pred_pose1, dtype=torch.float).unsqueeze(0)
-
-        # aggr_ptr = torch.tensor([0, data_dict['g1_node_count'], data_dict['total_node_count']], dtype=torch.long)
-        # graph_emb = self.aggr(fused_node_embs, ptr=aggr_ptr)
-
-        # pose1 = self.pose_lin(graph_emb[:, 0, :])
-        # pose2 = self.pose_lin(graph_emb[:, 1, :])
-
         return {
             'matches0': matches['matches0'],
             'matches1': matches['matches1'],
             'matching_scores0': matches['matching_scores0'],
             'matching_scores1': matches['matching_scores1'],
             'scores': scores,
-            # 'pose0': pred_pose0,
-            # 'pose1': pred_pose1,
         }
 
 
@@ -199,94 +176,3 @@ def log_optimal_transport(scores, alpha, iters: int):
 
 def arange_like(x, dim: int):
     return x.new_ones(x.shape[dim]).cumsum(0) - 1  # traceable in 1.1
-
-
-def p3p(image_points, world_points, K):
-    assert image_points.shape[0] == 4 and world_points.shape[0] == 4, "P3P requires exactly 3 point correspondences."
-    image_points = image_points.cpu().numpy()
-    world_points = world_points.cpu().numpy()
-    K = K.cpu().numpy()
-
-    def objective_function(vars):
-        R, t = vars[:9].reshape(3, 3), vars[9:]
-        t = t[:, np.newaxis]
-        projected_points = K @ (R @ world_points.T + t)
-        projected_points /= projected_points[2]  # Normalize by the depth
-        projected_points = projected_points[:2].T  # Take the first two rows and transpose
-        error = np.sum((projected_points - image_points)**2)
-        return error
-
-    # Initial estimate for the camera pose (R, t)
-    initial_guess = np.concatenate([np.eye(3).flatten(), np.zeros(3)])
-
-    result = scipy_minimize(objective_function, initial_guess, method='L-BFGS-B')
-    if result.success:
-        estimated_vars = result.x
-        R, t = estimated_vars[:9].reshape(3, 3), estimated_vars[9:]
-        # q = R2Quaternion(R)
-        q = np.zeros(4)
-        pose = np.concatenate([t, q], axis=0)
-        return pose
-    else:
-        # raise RuntimeError("P3P optimization failed.")
-        return None
-
-
-# def p3p(image_points, world_points, camera_intrinsics):
-#     assert len(image_points) == 4 and len(world_points) == 4, "P3P requires exactly 4 point correspondences."
-
-#     # Convert input data to PyTorch tensors
-#     camera_intrinsics = camera_intrinsics.clone().float()
-#     image_points = image_points.clone().float()
-#     world_points = torch.concat([world_points.clone(), torch.ones(len(world_points), 1)], dim=1).float()
-
-#     # Define the camera pose variables
-#     R = torch.eye(3, requires_grad=True)
-#     t = torch.zeros(3, requires_grad=True)
-
-#     # P3P nonlinear equation system
-#     def objective_function():
-#         predicted_image_points = project_points(world_points, R, t, camera_intrinsics)
-#         residual = predicted_image_points - image_points
-#         return torch.sum(residual ** 2)
-
-#     # Create an optimizer to minimize the objective function
-#     optimizer = torch.optim.SGD([R, t], lr=0.1)  # You can adjust the learning rate
-
-#     # Optimize the camera pose
-#     for _ in range(100):  # You may need to adjust the number of optimization iterations
-#         optimizer.zero_grad()
-#         loss = objective_function()
-#         # Rt = torch.cat([R, t.unsqueeze(1)], dim=1)
-#         # projected_points = torch.mm(camera_intrinsics, torch.mm(Rt, world_points.T))  # 3x4 * 4xN = 3xN
-#         # projected_points = projected_points / projected_points[2]  # Normalize by the depth
-#         # projected_points = projected_points[:2].T  # Take the first two rows and transpose
-#         # loss = torch.sum((projected_points - image_points) ** 2)
-#         loss.backward()
-#         optimizer.step()
-#     pose = torch.cat([R2Quaternion(R), t], dim=0)
-
-#     return pose
-
-
-# def project_points(world_points, R, t, K):
-#     # Perform the projection from world coordinates to image coordinates
-#     Rt = torch.cat([R, t.unsqueeze(1)], dim=1)
-#     projected_points = torch.mm(K, torch.mm(Rt, world_points.T))  # 3x4 * 4xN = 3xN
-#     projected_points = projected_points / projected_points[2]  # Normalize by the depth
-#     projected_points = projected_points[:2].T  # Take the first two rows and transpose
-#     # print('R grad_fn', R.grad_fn)
-#     # print('t grad_fn', t.grad_fn)
-#     # print('K grad_fn', K.grad_fn)
-#     # print('projected_points grad_fn', projected_points.grad_fn)
-#     return projected_points
-
-
-def R2Quaternion(R):
-    # https://www.euclideanspace.com/maths/geometry/rotations/conversions/matrixToQuaternion/
-    q = np.zeros(4)
-    q[0] = np.sqrt(1.0 + R[0, 0] + R[1, 1] + R[2, 2]) / 2.0
-    q[1] = (R[2, 1] - R[1, 2]) / (4.0 * q[0])
-    q[2] = (R[0, 2] - R[2, 0]) / (4.0 * q[0])
-    q[3] = (R[1, 0] - R[0, 1]) / (4.0 * q[0])
-    return q
