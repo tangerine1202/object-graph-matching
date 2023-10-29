@@ -1,11 +1,13 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
+import warnings
 from torch_geometric.nn import GATv2Conv
 import torch_geometric.nn as pygnn
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
 import numpy as np
+import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
 from scipy.optimize import minimize as scipy_minimize
 from solo2graph import MapGraph, QueryGraph, PairedGraph
@@ -142,11 +144,110 @@ def compute_pose(pred_dict, data_dict):
             bbox3d_t2 = data_dict['node_bbox3d'][0].cpu().numpy()
         bbox3d_t1 = bbox3d_t1[:data_dict['n1'].item(), :3]
         bbox3d_t2 = bbox3d_t2[data_dict['n1'].item():, :3]
-        pred_pose = pose_by_minimize_translation(bbox3d_t1, bbox3d_t2, corrs)
+        pred_R, pred_t = pose_by_ICP_with_SVD_init(bbox3d_t1, bbox3d_t2, corrs)
+
+        pred_pose = np.concatenate([pred_t, pred_R.as_quat()])
     return pred_pose
 
 
-def pose_by_minimize_translation(src, tgt, corrs):
+def pose_by_ICP_with_SVD_init(src, tgt, corrs=None, max_distance=1):
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+    src = src[corrs[:, 0]]
+    tgt = tgt[corrs[:, 1]]
+    # init with SVD
+    R_init, t_init = pose_by_minimize_t_with_SVD(src, tgt)
+    # ICP
+    if len(src) < 3:
+        return R_init, t_init
+    trans_init = np.eye(4)
+    trans_init[:3, :3] = R_init.as_matrix()
+    trans_init[:3, 3] = t_init
+    src_pcd = o3d.geometry.PointCloud()
+    tgt_pcd = o3d.geometry.PointCloud()
+    src_pcd.points = o3d.utility.Vector3dVector(src)
+    tgt_pcd.points = o3d.utility.Vector3dVector(tgt)
+    reg_p2p = o3d.pipelines.registration.registration_icp(
+        src_pcd, tgt_pcd, max_distance, trans_init,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),)
+    R = scipy_R.from_matrix(np.array(reg_p2p.transformation[:3, :3]))
+    t = np.array(reg_p2p.transformation[:3, 3])
+    return R, t
+
+
+def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs, max_distance=0.1, min_inliers=3,
+                                       max_iters=100, corrs_ratio=None, outlier_ratio=None):
+    """
+    # corrs_ratio: the ratio of correspondences that are inliers
+    # outlier_ratio: the ratio of outliers in the data
+    """
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+
+    sample_size = 3
+    if corrs_ratio is not None and outlier_ratio is not None:
+        max_iters = max(max_iters, int(np.log(1 - corrs_ratio) / np.log(1 - (1 - outlier_ratio)**sample_size)))
+    elif corrs_ratio is not None or outlier_ratio is not None:
+        warnings.warn('corrs_ratio and outlier_ratio should be both set or both None')
+
+    src = src[corrs[:, 0]]  # (n, 3)
+    tgt = tgt[corrs[:, 1]]
+
+    best_R, best_t = pose_by_minimize_t_with_SVD(src, tgt)
+    best_inliers = np.ones(len(src), dtype=bool)
+
+    if len(src) < sample_size:
+        return best_R, best_t
+
+    for _ in range(max_iters):
+        # Randomly select correspondence pairs
+        random_indices = np.random.choice(len(src), sample_size, replace=False)
+        src_sample = src[random_indices]
+        tgt_sample = tgt[random_indices]
+
+        # Compute the transformation
+        R, t = pose_by_minimize_t_with_SVD(src_sample, tgt_sample)
+
+        # Calculate the error for all correspondences
+        errors = np.linalg.norm((src @ R.as_matrix().T + t) - tgt, axis=1)
+
+        # Label correspondences as inliers or outliers based on the threshold
+        inliers = np.where(errors < max_distance)[0]
+
+        if len(inliers) >= min_inliers and len(inliers) > len(best_inliers):
+            best_R, best_t = R, t
+            best_inliers = inliers
+
+    return best_R, best_t  # , best_inliers
+
+
+def pose_by_minimize_t_with_SVD(src, tgt, corrs=None):
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+
+    src = src[corrs[:, 0]]  # (n, 3)
+    tgt = tgt[corrs[:, 1]]
+    src_center = src.mean(axis=0)
+    tgt_center = tgt.mean(axis=0)
+    src_centered = src - src_center
+    tgt_centered = tgt - tgt_center
+
+    H = src_centered.T @ tgt_centered  # (3, 3)
+    U, _, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    t = tgt_center - R @ src_center
+
+    R = scipy_R.from_matrix(R)
+    return R, t
+
+
+def pose_by_minimize_t_with_iter(src, tgt, corrs=None, max_iter=None):
     def icp_cost_function(transformation_flat, src, tgt):
         transformation = transformation_flat.reshape(4, 4)
         R, t = transformation[:3, :3], transformation[:3, 3]
@@ -154,17 +255,24 @@ def pose_by_minimize_translation(src, tgt, corrs):
         error = transformed_src - tgt
         return np.sum(np.linalg.norm(error, axis=1))
 
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
     assert corrs.shape[1] == 2
     src = src[corrs[:, 0]]
     tgt = tgt[corrs[:, 1]]
 
     T_init_flat = np.eye(4).flatten()
-    result = scipy_minimize(icp_cost_function, T_init_flat, args=(src, tgt), method='L-BFGS-B')
+    options = {'maxiter': max_iter} if max_iter is not None else {}
+
+    result = scipy_minimize(
+        icp_cost_function, T_init_flat, args=(src, tgt),
+        method='L-BFGS-B', options=options)
+
     T = result.x.reshape(4, 4)
     R, t = scipy_R.from_matrix(T[:3, :3]), T[:3, 3]
-    pose = np.concatenate((t, R.as_quat()))
     # error = result.fun
-    return pose
+    return R, t
 
 
 def matches_from_scores(scores, match_threshold: float):
