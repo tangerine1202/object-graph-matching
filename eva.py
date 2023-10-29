@@ -73,9 +73,9 @@ def compute_translation_error(pred_t, gt_t):
 
 
 def compute_rotation_error(pred_q, gt_q, deg=True):
-    if type(pred_q) is not scipy_R:
+    if not isinstance(pred_q, scipy_R):
         pred_q = scipy_R(pred_q)
-    if type(gt_q) is not scipy_R:
+    if not isinstance(gt_q, scipy_R):
         gt_q = scipy_R(gt_q)
 
     # rotation from pred to gt
