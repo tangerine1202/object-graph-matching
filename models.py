@@ -1,5 +1,6 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
+from itertools import combinations
 import warnings
 from torch_geometric.nn import GATv2Conv
 import torch_geometric.nn as pygnn
@@ -144,13 +145,13 @@ def compute_pose(pred_dict, data_dict):
             bbox3d_t2 = data_dict['node_bbox3d'][0].cpu().numpy()
         bbox3d_t1 = bbox3d_t1[:data_dict['n1'].item(), :3]
         bbox3d_t2 = bbox3d_t2[data_dict['n1'].item():, :3]
-        pred_R, pred_t = pose_by_ICP_with_SVD_init(bbox3d_t1, bbox3d_t2, corrs)
+        pred_R, pred_t = pose_by_ICP_with_corrs_init(bbox3d_t1, bbox3d_t2, corrs)
 
         pred_pose = np.concatenate([pred_t, pred_R.as_quat()])
     return pred_pose
 
 
-def pose_by_ICP_with_SVD_init(src, tgt, corrs=None, max_distance=1):
+def pose_by_ICP_with_corrs_init(src, tgt, corrs=None, max_distance=1):
     if corrs is None:
         assert src.shape == tgt.shape
         corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
@@ -158,7 +159,7 @@ def pose_by_ICP_with_SVD_init(src, tgt, corrs=None, max_distance=1):
     src = src[corrs[:, 0]]
     tgt = tgt[corrs[:, 1]]
     # init with SVD
-    R_init, t_init = pose_by_minimize_t_with_SVD(src, tgt)
+    R_init, t_init = pose_by_minimize_t_with_RANSAC_SVD(src, tgt, max_iters=30)
     # ICP
     if len(src) < 3:
         return R_init, t_init
@@ -177,7 +178,7 @@ def pose_by_ICP_with_SVD_init(src, tgt, corrs=None, max_distance=1):
     return R, t
 
 
-def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs, max_distance=0.1, min_inliers=3,
+def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs=None, max_distance=0.1, min_inliers=3,
                                        max_iters=100, corrs_ratio=None, outlier_ratio=None):
     """
     # corrs_ratio: the ratio of correspondences that are inliers
@@ -189,11 +190,6 @@ def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs, max_distance=0.1, min_in
     assert corrs.shape[1] == 2
 
     sample_size = 3
-    if corrs_ratio is not None and outlier_ratio is not None:
-        max_iters = max(max_iters, int(np.log(1 - corrs_ratio) / np.log(1 - (1 - outlier_ratio)**sample_size)))
-    elif corrs_ratio is not None or outlier_ratio is not None:
-        warnings.warn('corrs_ratio and outlier_ratio should be both set or both None')
-
     src = src[corrs[:, 0]]  # (n, 3)
     tgt = tgt[corrs[:, 1]]
 
@@ -203,11 +199,27 @@ def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs, max_distance=0.1, min_in
     if len(src) < sample_size:
         return best_R, best_t
 
-    for _ in range(max_iters):
-        # Randomly select correspondence pairs
-        random_indices = np.random.choice(len(src), sample_size, replace=False)
-        src_sample = src[random_indices]
-        tgt_sample = tgt[random_indices]
+    if corrs_ratio is not None and outlier_ratio is not None:
+        max_iters = min(max_iters, int(np.log(1 - corrs_ratio) / np.log(1 - (1 - outlier_ratio)**sample_size)))
+    elif corrs_ratio is not None or outlier_ratio is not None:
+        warnings.warn('corrs_ratio and outlier_ratio should be both set or both None')
+
+    # if combination is less than max_iters, use all combinations instead of random sampling
+    max_combs = np.math.comb(len(src), sample_size)
+    if max_combs <= max_iters:
+        max_iters = max_combs
+        combs = np.asarray(list(combinations(range(len(src)), sample_size)))
+
+    for i in range(max_iters):
+        if max_combs <= max_iters:
+            indices = combs[i]
+            src_sample = src[indices]
+            tgt_sample = tgt[indices]
+        else:
+            # Randomly select correspondence pairs
+            random_indices = np.random.choice(len(src), sample_size, replace=False)
+            src_sample = src[random_indices]
+            tgt_sample = tgt[random_indices]
 
         # Compute the transformation
         R, t = pose_by_minimize_t_with_SVD(src_sample, tgt_sample)
