@@ -20,7 +20,7 @@ else:
 print(f'torch device: {device}')
 
 # GNN package
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataLoader, PrefetchLoader
 import networkx as nx
 
 # Visualization
@@ -28,9 +28,9 @@ import cv2
 import matplotlib.pyplot as plt
 
 # %%
-from solo2graph import MapGraph, QueryGraph, PairedGraph
-from dataset import PairListDataset, transform_3D_qm_data, transform_2D_qq_data
-from models import CustomModel, compute_pose
+from solo2graph import MapGraph, QueryGraph
+from dataset import PairListDataset, transform_2Dto3D_qm_data, transform_3D_qm_data, transform_2D_qq_data
+from models import Model_3Dto3D, Model_2Dto2D, Model_2Dto3D
 from losses import CustomCriterion
 from eva import compute_eval, compute_corr, compute_confusion_matrix
 from viz_utils import read_img, viz_corr
@@ -47,7 +47,8 @@ SCENE = 'SimpleOffice'
 DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
 GRAPH_DIR = f'{DATA_DIR}/graph'
 PAIR_FNAME = 'qm_paired_list.csv'
-TRANSFORM = transform_3D_qm_data
+MODEL = Model_2Dto3D
+TRANSFORM = transform_2Dto3D_qm_data
 EVAL_TYPE = '3d'
 
 MIN_OVERLAP = 3
@@ -58,17 +59,17 @@ if not os.path.exists(CKPT_DIR):
     os.makedirs(CKPT_DIR)
 
 # %%
-ds = PairListDataset(root=DATA_DIR, pair_fname=PAIR_FNAME, transform=TRANSFORM)
-dl = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, pin_memory=False)
-dc = next(iter(dl))
+# ds = PairListDataset(root=DATA_DIR, pair_fname=PAIR_FNAME, transform=TRANSFORM)
+# dl = DataLoader(ds, batch_size=1, shuffle=True, num_workers=0, pin_memory=False)
+# dc = next(iter(dl))
 
-# %%
-print('--- attr ---')
-for attr_name, attr in {k: v for k, v in dc.items() if k.startswith('node_')}.items():
-    print(f'{attr_name} dim: {attr.shape[2]}')
-edge_attr_dim = dc['edge_attr'].shape[2]
-print(f'edge attr dim: {edge_attr_dim}')
-print()
+# # %%
+# print('--- attr ---')
+# for attr_name, attr in {k: v for k, v in dc.items() if k.startswith('node_')}.items():
+#     print(f'{attr_name} dim: {attr.shape[2]}')
+# edge_attr_dim = dc['edge_attr'].shape[2]
+# print(f'edge attr dim: {edge_attr_dim}')
+# print()
 
 # %%
 print('--- dataset ---')
@@ -76,7 +77,7 @@ ds = PairListDataset(root=DATA_DIR, pair_fname=PAIR_FNAME, transform=TRANSFORM, 
 print('dataset size:', len(ds))
 
 train_ds, eval_ds, test_ds = torch.utils.data.random_split(ds, [TRAIN_RATIO, EVAL_RATIO, TEST_RATIO])
-train_dl = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=0, pin_memory=True)
+train_dl = PrefetchLoader(DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=0, pin_memory=True))
 eval_dl = DataLoader(eval_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 test_dl = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0)
 
@@ -117,7 +118,7 @@ def eval_step(model, data_dict, criterion, eval_type):
 
 
 # %%
-model = CustomModel(edge_attr_dim, EMB_DIM, match_threshold=MATCH_THRESHOLD).to(device)
+model = MODEL(EMB_DIM, match_threshold=MATCH_THRESHOLD).to(device)
 criterion = CustomCriterion(device)
 optimizer = optim.AdamW(model.parameters(), lr=5e-4, amsgrad=True)
 

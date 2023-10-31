@@ -19,6 +19,7 @@ import torch
 from lavis.models import load_model_and_preprocess
 
 from solo_tool import Solo
+from utils import comp_graph_overlap
 
 
 if torch.cuda.is_available():
@@ -451,91 +452,6 @@ class QueryGraph:
         return True, data_dict
 
 
-class PairedGraph:
-    def __init__(self, qry_g, map_g):
-        self.g1 = qry_g
-        self.g2 = map_g
-        self.n1 = len(qry_g)
-        self.n2 = len(map_g)
-        self.n = self.n1 + self.n2
-
-        # concat node features
-        self.node_feat = {}
-        for feat_name in self.g1.node_feat.keys():
-            if feat_name not in self.g2.node_feat:
-                # print(f'Warning: {feat_name} not in g2')
-                continue
-            self.node_feat[feat_name] = np.concatenate(
-                [self.g1.node_feat[feat_name], self.g2.node_feat[feat_name]], axis=0)
-
-        # edge index
-        self.edge_index = {}
-        for edge_type in self.g1.edge_index.keys():
-            if edge_type not in self.g2.edge_index:
-                # print(f'Warning: {edge_type} not in g2')
-                continue
-            self.edge_index[edge_type] = np.concatenate(
-                [self.g1.edge_index[edge_type], self.g2.edge_index[edge_type] + self.n1], axis=1)
-        # edge index -- cross graph
-        # self.comp_cross_edge()
-        # self.adj = np.zeros((self.n, self.n))
-        # self.adj[:self.n1, :self.n1] = self.g1.adj
-        # self.adj[self.n1:, self.n1:] = self.g2.adj
-        # self.adj[self.n1:, :self.n1] = self.adj_g2tog1
-        # self.adj[:self.n1, self.n1:] = self.adj_g1tog2
-        # self.edge_index = self.adj2edge_index(self.adj)
-
-        # edge attr
-        self.edge_attr = {}
-        for edge_type in self.g1.edge_attr.keys():
-            if edge_type not in self.g2.edge_attr:
-                # print(f'Warning: {edge_type} not in g2')
-                continue
-            self.edge_attr[edge_type] = np.concatenate(
-                [self.g1.edge_attr[edge_type], self.g2.edge_attr[edge_type]], axis=0)
-
-        for edge_type in self.edge_attr.keys():
-            assert self.edge_attr[edge_type].shape[0] == self.edge_index[edge_type].shape[1], \
-                f'edge_type {edge_type} shape of edge_attr {self.edge_attr[edge_type].shape} ' \
-                f'does not match edge_index shape {self.edge_index[edge_type].shape}'
-
-        # ground truth matching
-        self.comp_GT_matching()
-
-    # def comp_cross_edge(self):
-    #     # compute edge between g1 and g2
-    #     self.edge_g1tog2 = np.array([[g1_node_id, g2_node_id]
-    #                                 for g1_node_id in self.g1.node_ids for g2_node_id in self.g2.node_ids]).T
-    #     self.edge_g2tog1 = np.array([[g2_node_id, g1_node_id]
-    #                                 for g2_node_id in self.g2.node_ids for g1_node_id in self.g1.node_ids]).T
-    #     adj_g1tog2 = np.zeros((len(self.g1), len(self.g2)))
-    #     adj_g2tog1 = np.zeros((len(self.g2), len(self.g1)))
-    #     adj_g1tog2[self.edge_g1tog2[0], self.edge_g1tog2[1]] = 1
-    #     adj_g2tog1[self.edge_g2tog1[0], self.edge_g2tog1[1]] = 1
-    #     # self.adj_g1tog2 = adj_g1tog2
-    #     # self.adj_g2tog1 = adj_g2tog1
-
-    # def adj2edge_index(self, adj):
-    #     edge_index = []
-    #     for i in range(adj.shape[0]):
-    #         for j in range(adj.shape[1]):
-    #             if adj[i, j] == 1:
-    #                 edge_index.append([i, j])
-    #     edge_index = np.array(edge_index).T
-    #     return edge_index
-
-    def comp_GT_matching(self):
-        self.all_inst_ids = list(set(self.g1.inst_ids) | set(self.g2.inst_ids))
-        self.anchor_inst_ids = list(set(self.g1.inst_ids) & set(self.g2.inst_ids))
-        self.e1i = [self.g1.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
-        self.e1j = [self.g1.inst2node[inst_id] for inst_id in self.g1.inst_ids if inst_id not in self.anchor_inst_ids]
-        self.e2i = [self.g2.inst2node[inst_id] for inst_id in self.anchor_inst_ids]
-        self.e2j = [self.g2.inst2node[inst_id] for inst_id in self.g2.inst_ids if inst_id not in self.anchor_inst_ids]
-
-    def __len__(self):
-        return self.n
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--path',
@@ -627,8 +543,8 @@ if __name__ == '__main__':
                 map_fname = qry_fnames[j]
                 qry_graph = pkl.load(open(os.path.join(GRAPH_PATH, qry_fname), 'rb'))
                 map_graph = pkl.load(open(os.path.join(GRAPH_PATH, map_fname), 'rb'))
-                paired_graph = PairedGraph(qry_graph, map_graph)
-                n_overlap = len(paired_graph.e1i)
+                e1i, _, _, _ = comp_graph_overlap(qry_graph, map_graph)
+                n_overlap = len(e1i)
                 paired_df = pd.concat((paired_df, pd.DataFrame({'qry_fname': qry_fname,
                                                                 'map_fname': map_fname,
                                                                 'n_overlap': n_overlap}, index=[0])), ignore_index=True)
@@ -644,8 +560,8 @@ if __name__ == '__main__':
         paired_df = pd.DataFrame(columns=['qry_fname', 'map_fname', 'n_overlap'])
         for qry_fname in tqdm(qry_fnames):
             qry_graph = pkl.load(open(os.path.join(GRAPH_PATH, qry_fname), 'rb'))
-            paired_graph = PairedGraph(qry_graph, map_graph)
-            n_overlap = len(paired_graph.e1i)
+            e1i, _, _, _ = comp_graph_overlap(qry_graph, map_graph)
+            n_overlap = len(e1i)
             paired_df = pd.concat((paired_df, pd.DataFrame({'qry_fname': qry_fname,
                                                             'map_fname': map_fname,
                                                             'n_overlap': n_overlap}, index=[0])), ignore_index=True)
