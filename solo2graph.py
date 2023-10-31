@@ -89,7 +89,7 @@ def world2local_bbox3d(cam_pose, world_t, world_q, world_s):
     cam_R = R.from_quat(cam_pose[3:])
     local_t = cam_R.inv().apply(world_t - cam_t)  # (n, 3)
     local_r = cam_R.inv() * R.from_quat(world_q)
-    local_s = np.array(world_s)
+    local_s = np.abs(world_s)  # (n, 3)
     bbox3d_df = pd.DataFrame(np.concatenate((local_t, local_r.as_quat(), local_s), axis=1),
                              columns=['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz',
                                       'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw',
@@ -140,6 +140,25 @@ def comp_bbox3d_dist_and_quat(bbox3d_df, xyz_cols):
     edge_attr = pd.DataFrame(np.concatenate((dist, xyz, w), axis=1), columns=[
         'bbox3d_dist', 'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw'])  # (n*n, 5)
     return edge_attr
+
+
+def get_camera_intrinsics(cap, env_meta):
+    # camera intrinsics
+    img_dim = cap.dimension
+    horizontalFOV = env_meta['camera']['horizontalFOV']
+    verticalFOV = env_meta['camera']['verticalFOV']
+    normalized_x_scale = np.tan(np.deg2rad(horizontalFOV / 2))
+    normalized_y_scale = np.tan(np.deg2rad(verticalFOV / 2))
+    fx = img_dim[0] / (2 * normalized_x_scale)
+    fy = img_dim[1] / (2 * normalized_y_scale)
+    cx = img_dim[0] / 2
+    cy = img_dim[1] / 2
+    intrinsics = np.array([
+        [fx, 0, cx],
+        [0, -fy, cy],
+        [0, 0, 1],
+    ])
+    return intrinsics
 
 
 class MapGraph:
@@ -446,7 +465,7 @@ class QueryGraph:
             'total_obj_cnt': len(query_df),
             'step': f.step,
             'camera_pose': cap.camera_pose,
-            'camera_intrinsics': cap.projectionMatrix,
+            'camera_intrinsics': get_camera_intrinsics(cap, env_meta),
         }
 
         return True, data_dict
@@ -508,7 +527,7 @@ if __name__ == '__main__':
             shutil.rmtree(GRAPH_PATH)
         os.mkdir(GRAPH_PATH)
 
-        solo = Solo(args.path, is_reorganized=args.rearrange, move=args.move)
+        solo = Solo(args.path, is_reorganized=(not args.rearrange), move=args.move)
 
         model, vis_processors, txt_processors = load_model_and_preprocess(
             name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)

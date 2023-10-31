@@ -109,9 +109,9 @@ def transform_2Dto3D_qm_data(pg):
         torch.tensor(map_g.node_feat['bbox3d_qy'], dtype=torch.float),
         torch.tensor(map_g.node_feat['bbox3d_qz'], dtype=torch.float),
         torch.tensor(map_g.node_feat['bbox3d_qw'], dtype=torch.float),
-        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float),
-        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float),
-        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float).abs(),
+        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float).abs(),
+        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float).abs(),
     ), dim=1)
 
     data['map_node_text'] = torch.tensor(map_g.node_feat['text_embs'], dtype=torch.float)
@@ -123,14 +123,14 @@ def transform_2Dto3D_qm_data(pg):
     data['qry_node_position'] = torch.cat((
         torch.tensor(qry_g.node_feat['bbox_cx'], dtype=torch.float),
         torch.tensor(qry_g.node_feat['bbox_cy'], dtype=torch.float)
-    ), dim=1) / 320
+    ), dim=1)
     data['qry_node_bbox'] = torch.cat((
         torch.tensor(qry_g.node_feat['bbox_cx'], dtype=torch.float),
         torch.tensor(qry_g.node_feat['bbox_cy'], dtype=torch.float),
-        torch.tensor(qry_g.node_feat['bbox_h'], dtype=torch.float),
         torch.tensor(qry_g.node_feat['bbox_w'], dtype=torch.float),
-        torch.tensor(qry_g.node_feat['bbox_h'] * qry_g.node_feat['bbox_w'], dtype=torch.float) / (320 ** 2),  # size
-    ), dim=1) / 320
+        torch.tensor(qry_g.node_feat['bbox_h'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_w'] * qry_g.node_feat['bbox_h'], dtype=torch.float) / (320 ** 2),  # size
+    ), dim=1)
 
     data['qry_node_text'] = torch.tensor(qry_g.node_feat['text_embs'], dtype=torch.float)
     data['qry_node_norm_text'] = torch.tensor(qry_g.node_feat['norm_text_embs'], dtype=torch.float)
@@ -167,9 +167,9 @@ def transform_3D_qm_data(pg):
         torch.tensor(pg.node_feat['bbox3d_qy'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox3d_qz'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox3d_qw'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_sx'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_sy'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_sz'], dtype=torch.float),
+        torch.tensor(pg.node_feat['bbox3d_sx'], dtype=torch.float).abs(),
+        torch.tensor(pg.node_feat['bbox3d_sy'], dtype=torch.float).abs(),
+        torch.tensor(pg.node_feat['bbox3d_sz'], dtype=torch.float).abs(),
     ), dim=1)
 
     data['node_text'] = torch.tensor(pg.node_feat['text_embs'], dtype=torch.float)
@@ -206,9 +206,9 @@ def transform_2D_qq_data(pg):
     data['node_bbox'] = torch.cat((
         torch.tensor(pg.node_feat['bbox_cx'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox_cy'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox_h'], dtype=torch.float),
         torch.tensor(pg.node_feat['bbox_w'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox_h'] * pg.node_feat['bbox_w'], dtype=torch.float) / (320 ** 2),  # size
+        torch.tensor(pg.node_feat['bbox_h'], dtype=torch.float),
+        torch.tensor(pg.node_feat['bbox_w'] * pg.node_feat['bbox_h'], dtype=torch.float) / (320 ** 2),  # size
     ), dim=1) / 320
 
     data['node_text'] = torch.tensor(pg.node_feat['text_embs'], dtype=torch.float)

@@ -56,13 +56,3 @@ class Capture():
     @property
     def camera_pose(self):
         return np.concatenate((self.position, self.rotation))
-
-    @property
-    def rgb_capture(self):
-        return {
-            'filename': self.filename,
-            'imageFormat': self.imageFormat,
-            'dimension': self.dimension,
-            'projection': self.projection,
-            'projectionMatrix': self.projectionMatrix,
-        }

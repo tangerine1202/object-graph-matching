@@ -16,6 +16,11 @@ def read_graph(step, data_dir):
     return pkl.load(open(f'{data_dir}/graph/step{step}.pkl', 'rb'))
 
 
+def draw_bbox(img, bbox_xywh, color=(255, 0, 0), thickness=2):
+    bbox_xywh = bbox_xywh.astype(np.int32)
+    return cv2.rectangle(img, (bbox_xywh[0], bbox_xywh[1]), (bbox_xywh[0] + bbox_xywh[2], bbox_xywh[1] + bbox_xywh[3]), color, thickness)
+
+
 def viz_corr(
     pred_dict, data_dict,
     data_dir,
