@@ -1,6 +1,6 @@
 # %%
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 from pprint import pprint
 import pickle as pkl
 
@@ -30,33 +30,47 @@ import matplotlib.pyplot as plt
 # %%
 from solo2graph import MapGraph, QueryGraph
 from dataset import PairListDataset, transform_2Dto3D_qm_data, transform_3D_qm_data, transform_2D_qq_data
-from models import Model_3Dto3D, Model_2Dto2D, Model_2Dto3D
+from models import Model_3Dto3D, Model_2Dto2D, Model_2Dto3D, compute_pose_from_2Dto3D_bbox, pose_by_PnP
 from losses import CustomCriterion
-from eva import compute_eval, compute_corr, compute_confusion_matrix
+from eva import compute_eval, compute_pose_error, compute_corr, compute_confusion_matrix
 from viz_utils import read_img, viz_corr
 
 # %%
 
 EMB_DIM = 128
 MATCH_THRESHOLD = 0.2
-TOTAL_EPOCHS = 75
-EVAL_EPOCHS = 3
+TOTAL_EPOCHS = 100
+EVAL_EPOCHS = 5
+
+MIN_OVERLAP = 3
+TRAIN_RATIO, EVAL_RATIO, TEST_RATIO = 0.5, 0.2, 0.3
 
 SOLO_NAME = 'poisson1r36'
 SCENE = 'SimpleOffice'
 DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
 GRAPH_DIR = f'{DATA_DIR}/graph'
-PAIR_FNAME = 'qm_paired_list.csv'
-MODEL = Model_2Dto3D
-TRANSFORM = transform_2Dto3D_qm_data
-EVAL_TYPE = '3d'
+TASK = '2Dto3D'
 
-MIN_OVERLAP = 3
-TRAIN_RATIO, EVAL_RATIO, TEST_RATIO = 0.5, 0.2, 0.3
+if TASK == '2Dto3D':
+    PAIR_FNAME = 'qm_paired_list.csv'
+    MODEL = Model_2Dto3D
+    TRANSFORM = transform_2Dto3D_qm_data
+    EVAL_TYPE = '3d'
+elif TASK == '3Dto3D':
+    PAIR_FNAME = 'qm_paired_list.csv'
+    MODEL = Model_3Dto3D
+    TRANSFORM = transform_3D_qm_data
+    EVAL_TYPE = '3d'
+elif TASK == '2Dto2D':
+    PAIR_FNAME = 'qq_paired_list.csv'
+    MODEL = Model_2Dto2D
+    TRANSFORM = transform_2D_qq_data
+    EVAL_TYPE = '2d'
 
-CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}'
+CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}/{TASK}'
 if not os.path.exists(CKPT_DIR):
     os.makedirs(CKPT_DIR)
+
 
 # %%
 # ds = PairListDataset(root=DATA_DIR, pair_fname=PAIR_FNAME, transform=TRANSFORM)

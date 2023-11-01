@@ -9,7 +9,7 @@ import shutil
 
 from tqdm.auto import tqdm
 
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as scipy_R
 import numpy as np
 import pandas as pd
 import cv2
@@ -19,7 +19,7 @@ import torch
 from lavis.models import load_model_and_preprocess
 
 from solo_tool import Solo
-from utils import comp_graph_overlap
+from utils import comp_graph_overlap, transform_bbox3d, corners_of_bbox3d, invert_Rt
 
 
 if torch.cuda.is_available():
@@ -77,24 +77,6 @@ def extract_multimodal_features(raw_image, text):
         'norm_image': feat_norm_img,
         'norm_text': feat_norm_txt,
     }
-
-
-def world2local_bbox3d(cam_pose, world_t, world_q, world_s):
-    assert cam_pose.shape == (7,), f'cam_pose shape should be (7, ), but got {cam_pose.shape}'
-    assert world_t.shape[1] == 3, f'world_t shape should be (n, 3), but got {world_t.shape}'
-    assert world_q.shape[1] == 4, f'world_q shape should be (n, 4), but got {world_q.shape}'
-    assert world_s.shape[1] == 3, f'world_s shape should be (n, 3), but got {world_s.shape}'
-    # convert bbox3d from global to local
-    cam_t = cam_pose[:3].reshape(1, 3)  # (1, 3)
-    cam_R = R.from_quat(cam_pose[3:])
-    local_t = cam_R.inv().apply(world_t - cam_t)  # (n, 3)
-    local_r = cam_R.inv() * R.from_quat(world_q)
-    local_s = np.abs(world_s)  # (n, 3)
-    bbox3d_df = pd.DataFrame(np.concatenate((local_t, local_r.as_quat(), local_s), axis=1),
-                             columns=['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz',
-                                      'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw',
-                                      'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'])
-    return bbox3d_df
 
 
 def comp_bbox2d_dist_and_angle(bbox2d_df, xy_cols):
@@ -387,6 +369,9 @@ class QueryGraph:
         if not inst.has_instance:
             return False, None
 
+        R_wc = scipy_R.from_quat(cap.camera_pose[3:])
+        t_wc = cap.camera_pose[:3]
+        R_cw, t_cw = invert_Rt(R_wc, t_wc)
         # === query ===
         query_df = meta_df.copy()
 
@@ -402,10 +387,12 @@ class QueryGraph:
             columns={0: 'w_bbox3d_qx', 1: 'w_bbox3d_qy', 2: 'w_bbox3d_qz', 3: 'w_bbox3d_qw'})
         world_bbox3d_s_df = query_df['object_size'].apply(pd.Series).rename(
             columns={0: 'w_bbox3d_sx', 1: 'w_bbox3d_sy', 2: 'w_bbox3d_sz'})
-        local_bbox3d_df = world2local_bbox3d(
-            cap.camera_pose, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df)
-        local_bbox3d_df.index = query_df.index
-        query_df = pd.concat((query_df, local_bbox3d_df), axis=1)
+        bbox3d_world_df = pd.concat((world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df), axis=1)
+        bbox3d_local_df = pd.DataFrame(transform_bbox3d(bbox3d_world_df.values, R_cw, t_cw), columns=[
+            'bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz',
+            'bbox3d_qx', 'bbox3d_qy', 'bbox3d_qz', 'bbox3d_qw',
+            'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'], index=query_df.index)
+        query_df = pd.concat((query_df, bbox3d_local_df), axis=1)
         query_df = query_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
 
         # merge annotations

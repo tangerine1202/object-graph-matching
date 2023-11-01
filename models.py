@@ -3,15 +3,25 @@ os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '0'
 from itertools import combinations
 import warnings
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import GATv2Conv
 import torch_geometric.nn as pygnn
+from scipy.spatial.transform import Rotation as scipy_R
+from scipy.optimize import minimize as scipy_minimize
+import open3d as o3d
 
 from solo2graph import MapGraph, QueryGraph
-from .utils import pose_by_ICP_with_corrs_init
+from utils import (
+    compute_intersect_area,
+    compute_union_area,
+    transform_bbox3d,
+    corners_of_bbox3d,
+    project_bbox3d_to_2d_xyxy,
+)
 
 if torch.backends.mps.is_available():
     device = torch.device('mps')
@@ -148,9 +158,8 @@ class Model_2Dto3D(nn.Module):
 
         if not self.training:
             # compute pose
-            warnings.warn('2D to 3D pose estimation is not implemented yet')
-            # pred_pose = compute_pose_from_bbox3d(pred_dict, data_dict)
-            # pred_dict['pose'] = pred_pose
+            pred_pose = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
+            pred_dict['pose'] = pred_pose
 
         return pred_dict
 
@@ -396,3 +405,245 @@ def log_optimal_transport(scores, alpha, iters: int):
 
 def arange_like(x, dim: int):
     return x.new_ones(x.shape[dim]).cumsum(0) - 1  # traceable in 1.1
+
+
+def compute_pose_from_2Dto3D_bbox(pred_dict, data_dict):
+    pred_e1i = np.array([idx for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    pred_e2i = np.array([v.item() for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    corrs = np.stack([pred_e1i, pred_e2i], axis=1)  # (n, 2)
+    if len(pred_e1i) == 0:
+        pred_pose = None
+    else:
+        bbox_ccwh = data_dict['qry_node_bbox'][0][corrs[:, 0], :4]
+        bbox3d_world = data_dict['map_node_bbox3d'][0][corrs[:, 1]]
+        K = data_dict['qry_camera_intrinsics'][0]
+        if isinstance(bbox_ccwh, torch.Tensor):
+            bbox_ccwh = bbox_ccwh.cpu().numpy()
+        if isinstance(bbox3d_world, torch.Tensor):
+            bbox3d_world = bbox3d_world.cpu().numpy()
+        if isinstance(K, torch.Tensor):
+            K = K.cpu().numpy()
+        pts3d = bbox3d_world[:, :3]  # bbox3d center
+        pts2d = bbox_ccwh[:, :2]  # bbox2d center
+        if pts3d.shape[0] > 3:
+            R_wc_init, t_wc_init = pose_by_PnP(pts3d, pts2d, K)
+        else:
+            R_wc_init, t_wc_init = scipy_R.from_matrix(np.eye(3)), np.zeros(3)
+        R_cw_init, t_cw_init = R_wc_init.inv(), -R_wc_init.inv().apply(t_wc_init)
+        bbox3d = transform_bbox3d(bbox3d_world, R_cw_init, t_cw_init)
+        R_wc_refine, t_wc_refine = pose_by_minimize_bbox3d_projection(bbox3d_world, bbox_ccwh, K)
+        # combine with the initial pose
+        R_wc, t_wc = R_wc_refine * R_wc_init, t_wc_refine + R_wc_refine.apply(t_wc_init)
+        pred_pose = np.concatenate([t_wc, R_wc.as_quat()])
+    return pred_pose
+
+
+def pose_by_PnP(pts3d, pts2d, K, allow_3points=False):
+    assert pts3d.shape[0] >= 3
+    assert pts3d.shape[0] == pts2d.shape[0]
+    assert pts3d.shape[1] == 3
+    assert pts2d.shape[1] == 2
+    pts3d = pts3d.astype(float)
+    pts2d = pts2d.astype(float)
+    K = K.astype(float)
+    flags = cv2.SOLVEPNP_EPNP
+    if allow_3points and pts3d.shape[0] == 3:
+        flags = cv2.SOLVEPNP_SQPNP
+    else:
+        assert allow_3points or pts3d.shape[0] >= 4
+    retval, rvec, tvec = cv2.solvePnP(pts3d, pts2d, K, None, flags=flags)
+    R_cw = scipy_R.from_rotvec(rvec.flatten())
+    t_cw = tvec.flatten()
+    R_wc, t_wc = R_cw.inv(), -(R_cw.inv().apply(t_cw))
+    return R_wc, t_wc
+
+
+def pose_by_minimize_bbox3d_projection(bbox3d, bbox_ccwh, K, max_iter=None):
+    def bbox3dto2d_proj_cost_function(T_flat, bbox3d, bbox2d_xyxy, K):
+        T = T_flat.reshape(4, 4)
+        R, t = scipy_R.from_matrix(np.array(T[:3, :3])), T[:3, 3]
+
+        transformed_bbox3d = transform_bbox3d(bbox3d, R, t)
+        transformed_bbox2d_xyxy = project_bbox3d_to_2d_xyxy(transformed_bbox3d, K)
+        # calculate IoU of transformed_bbox2d and bbox2d
+        total_intersect_area = 0
+        total_union_area = 0
+        for i in range(len(bbox2d_xyxy)):
+            intersect_area = compute_intersect_area(bbox2d_xyxy[i], transformed_bbox2d_xyxy[i])
+            union_area = compute_union_area(bbox2d_xyxy[i], transformed_bbox2d_xyxy[i])
+            total_intersect_area += intersect_area
+            total_union_area += union_area
+        iou = total_intersect_area / total_union_area
+        error = 1 - iou
+        return error
+
+    bbox_xyxy = bbox_ccwh.copy()
+    bbox_xyxy[:, :2] -= bbox_ccwh[:, 2:] / 2
+    bbox_xyxy[:, 2:] += bbox_ccwh[:, 2:] / 2
+
+    T_init_flat = np.eye(4).flatten()
+    options = None if max_iter is None else {'maxiter': max_iter}
+
+    result = scipy_minimize(
+        bbox3dto2d_proj_cost_function, T_init_flat, args=(bbox3d, bbox_xyxy, K),
+        method='L-BFGS-B', options=options)
+    # print('obj:', result.fun)
+
+    T_cw = result.x.reshape(4, 4)
+    R_cw, t_cw = scipy_R.from_matrix(T_cw[:3, :3]), T_cw[:3, 3]
+    R_wc, t_wc = R_cw.inv(), -R_cw.inv().apply(t_cw)
+    # error = result.fun
+    return R_wc, t_wc
+
+
+def compute_pose_from_bbox3d(pred_dict, data_dict):
+    pred_e1i = np.array([idx for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    pred_e2i = np.array([v.item() for idx, v in enumerate(pred_dict['matches0']) if v != -1])
+    corrs = np.stack([pred_e1i, pred_e2i], axis=1)  # (n, 2)
+    if len(pred_e1i) == 0:
+        pred_pose = None
+    else:
+        if isinstance(data_dict['node_bbox3d'], torch.Tensor):
+            bbox3d_t1 = data_dict['node_bbox3d'][0].cpu().numpy()
+            bbox3d_t2 = data_dict['node_bbox3d'][0].cpu().numpy()
+        bbox3d_t1 = bbox3d_t1[:data_dict['n1'].item(), :3]
+        bbox3d_t2 = bbox3d_t2[data_dict['n1'].item():, :3]
+        pred_R, pred_t = pose_by_ICP_with_corrs_init(bbox3d_t1, bbox3d_t2, corrs)
+        pred_pose = np.concatenate([pred_t, pred_R.as_quat()])
+    return pred_pose
+
+
+def pose_by_ICP_with_corrs_init(src, tgt, corrs=None, max_distance=1):
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+    src = src[corrs[:, 0]]
+    tgt = tgt[corrs[:, 1]]
+    # init with SVD
+    R_init, t_init = pose_by_minimize_t_with_RANSAC_SVD(src, tgt, max_iters=30)
+    # ICP
+    if len(src) < 3:
+        return R_init, t_init
+    trans_init = np.eye(4)
+    trans_init[:3, :3] = R_init.as_matrix()
+    trans_init[:3, 3] = t_init
+    src_pcd = o3d.geometry.PointCloud()
+    tgt_pcd = o3d.geometry.PointCloud()
+    src_pcd.points = o3d.utility.Vector3dVector(src)
+    tgt_pcd.points = o3d.utility.Vector3dVector(tgt)
+    reg_p2p = o3d.pipelines.registration.registration_icp(
+        src_pcd, tgt_pcd, max_distance, trans_init,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),)
+    R = scipy_R.from_matrix(np.array(reg_p2p.transformation[:3, :3]))
+    t = np.array(reg_p2p.transformation[:3, 3])
+    return R, t
+
+
+def pose_by_minimize_t_with_RANSAC_SVD(src, tgt, corrs=None, max_distance=0.1, min_inliers=3,
+                                       max_iters=100, corrs_ratio=None, outlier_ratio=None):
+    """
+    # corrs_ratio: the ratio of correspondences that are inliers
+    # outlier_ratio: the ratio of outliers in the data
+    """
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+
+    sample_size = 3
+    src = src[corrs[:, 0]]  # (n, 3)
+    tgt = tgt[corrs[:, 1]]
+
+    best_R, best_t = pose_by_minimize_t_with_SVD(src, tgt)
+    best_inliers = np.ones(len(src), dtype=bool)
+
+    if len(src) < sample_size:
+        return best_R, best_t
+
+    if corrs_ratio is not None and outlier_ratio is not None:
+        max_iters = min(max_iters, int(np.log(1 - corrs_ratio) / np.log(1 - (1 - outlier_ratio)**sample_size)))
+    elif corrs_ratio is not None or outlier_ratio is not None:
+        warnings.warn('corrs_ratio and outlier_ratio should be both set or both None')
+
+    # if combination is less than max_iters, use all combinations instead of random sampling
+    max_combs = np.math.comb(len(src), sample_size)
+    if max_combs <= max_iters:
+        max_iters = max_combs
+        combs = np.asarray(list(combinations(range(len(src)), sample_size)))
+
+    for i in range(max_iters):
+        if max_combs <= max_iters:
+            indices = combs[i]
+            src_sample = src[indices]
+            tgt_sample = tgt[indices]
+        else:
+            # Randomly select correspondence pairs
+            random_indices = np.random.choice(len(src), sample_size, replace=False)
+            src_sample = src[random_indices]
+            tgt_sample = tgt[random_indices]
+
+        # Compute the transformation
+        R, t = pose_by_minimize_t_with_SVD(src_sample, tgt_sample)
+
+        # Calculate the error for all correspondences
+        errors = np.linalg.norm((src @ R.as_matrix().T + t) - tgt, axis=1)
+
+        # Label correspondences as inliers or outliers based on the threshold
+        inliers = np.where(errors < max_distance)[0]
+
+        if len(inliers) >= min_inliers and len(inliers) > len(best_inliers):
+            best_R, best_t = R, t
+            best_inliers = inliers
+
+    return best_R, best_t  # , best_inliers
+
+
+def pose_by_minimize_t_with_SVD(src, tgt, corrs=None):
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+
+    src = src[corrs[:, 0]]  # (n, 3)
+    tgt = tgt[corrs[:, 1]]
+    src_center = src.mean(axis=0)
+    tgt_center = tgt.mean(axis=0)
+    src_centered = src - src_center
+    tgt_centered = tgt - tgt_center
+
+    H = src_centered.T @ tgt_centered  # (3, 3)
+    U, _, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    t = tgt_center - R @ src_center
+
+    R = scipy_R.from_matrix(R)
+    return R, t
+
+
+def pose_by_minimize_t_with_iter(src, tgt, corrs=None, max_iter=None):
+    def icp_cost_function(transformation_flat, src, tgt):
+        transformation = transformation_flat.reshape(4, 4)
+        R, t = transformation[:3, :3], transformation[:3, 3]
+        transformed_src = src @ R.T + t  # (n, 3)
+        error = transformed_src - tgt
+        return np.sum(np.linalg.norm(error, axis=1))
+
+    if corrs is None:
+        assert src.shape == tgt.shape
+        corrs = np.stack([np.arange(len(src)), np.arange(len(tgt))], axis=1)
+    assert corrs.shape[1] == 2
+    src = src[corrs[:, 0]]
+    tgt = tgt[corrs[:, 1]]
+
+    T_init_flat = np.eye(4).flatten()
+    options = {'maxiter': max_iter} if max_iter is not None else {}
+
+    result = scipy_minimize(
+        icp_cost_function, T_init_flat, args=(src, tgt),
+        method='L-BFGS-B', options=options)
+
+    T = result.x.reshape(4, 4)
+    R, t = scipy_R.from_matrix(T[:3, :3]), T[:3, 3]
+    # error = result.fun
+    return R, t
