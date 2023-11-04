@@ -381,6 +381,7 @@ class QueryGraph:
         query_df = query_df.rename(columns={'object_labelName': 'label_name'})
         query_df['label_id'] = query_df['label_name'].apply(lambda x: anno_defs['instance segmentation'].name2id[x])
 
+        # NOTE: local bbox3d from world bbox3d
         world_bbox3d_t_df = query_df['object_translation'].apply(pd.Series).rename(
             columns={0: 'w_bbox3d_tx', 1: 'w_bbox3d_ty', 2: 'w_bbox3d_tz'})
         world_bbox3d_q_df = query_df['object_rotation'].apply(pd.Series).rename(
@@ -394,6 +395,13 @@ class QueryGraph:
             'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'], index=query_df.index)
         query_df = pd.concat((query_df, bbox3d_local_df), axis=1)
         query_df = query_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
+
+        # NOTE: local bbox3d from perception
+        # world_bbox3d_s_df = query_df['object_size'].apply(pd.Series).rename(
+        #     columns={0: 'w_bbox3d_sx', 1: 'w_bbox3d_sy', 2: 'w_bbox3d_sz'})
+        # local_bbox3d_s_df = pd.DataFrame(R_cw.apply(world_bbox3d_s_df.values), columns=[
+        #     'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'], index=query_df.index)
+        # bbox3d_df.update(local_bbox3d_s_df)
 
         # merge annotations
         inst_df_for_merge = inst_df.copy() \
@@ -414,8 +422,8 @@ class QueryGraph:
         query_df = pd.merge(query_df, bbox_df_for_merge, how='inner', left_on='instanceId',
                             right_on='instanceId', suffixes=('', '_duplicated'))
         # NOTE: compute bbox3d from world bbox3d
-        # obj_df = pd.merge(obj_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
-        #                   right_on='instanceId', suffixes=('', '_duplicated'))
+        # query_df = pd.merge(query_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
+        #                     right_on='instanceId', suffixes=('', '_duplicated'))
         query_df = query_df.rename(columns={'instanceId': 'inst_id'})
 
         # filter out small object
