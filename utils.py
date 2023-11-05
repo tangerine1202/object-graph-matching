@@ -10,14 +10,14 @@ def invert_Rt(R, t):
     assert isinstance(R, scipy_R)
     assert t.shape == (3,)
     R_inv = R.inv()
-    t_inv = -(R_inv.as_matrix() @ t)
+    t_inv = -(R_inv.apply(t))
     return R_inv, t_inv
 
 # ----- Graph -----
 
 
 def comp_graph_overlap(g1, g2):
-    all_inst_ids = list(set(g1.inst_ids) | set(g2.inst_ids))
+    # all_inst_ids = list(set(g1.inst_ids) | set(g2.inst_ids))
     anchor_inst_ids = list(set(g1.inst_ids) & set(g2.inst_ids))
     e1i = [g1.inst2node[inst_id] for inst_id in anchor_inst_ids]
     e1j = [g1.inst2node[inst_id] for inst_id in g1.inst_ids if inst_id not in anchor_inst_ids]
@@ -35,10 +35,10 @@ def transform_bbox3d(bbox3d, R, t):
     t_local = bbox3d[:, :3].copy()
     q_local = bbox3d[:, 3:7].copy()
     s_local = bbox3d[:, 7:].copy()
-    t_local = t_local @ R.as_matrix().T + t
+    t_local = R.apply(t_local) + t
     # transform q_local with R
     q_local = np.asarray([(R * scipy_R.from_quat(q)).as_quat() for q in q_local])
-    s_local = s_local @ R.as_matrix().T
+    s_local = R.apply(s_local)
     bbox3d_local = np.concatenate([t_local, q_local, s_local], axis=1)
     return bbox3d_local
 
@@ -49,9 +49,8 @@ def corners_of_bbox3d(bbox3d):
     corners = np.zeros((N, 8, 3))
     for i in range(len(bbox3d)):
         t = bbox3d[i, :3]
-        q = bbox3d[i, 3:7]
+        r = scipy_R.from_quat(bbox3d[i, 3:7])
         s = bbox3d[i, 7:]
-        r = scipy_R.from_quat(q)
         corners[i] = np.array([
             [1, 1, 1],
             [1, 1, -1],
@@ -79,7 +78,6 @@ def project_bbox3d_to_2d_xyxy(bbox3d, K):
             corners_h[:, 0].max(),
             corners_h[:, 1].max(),
         ])
-        bbox[i] = np.clip(bbox[i], 0, 320)
     return bbox
 
 # ----- IoU -----

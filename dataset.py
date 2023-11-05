@@ -109,9 +109,9 @@ def transform_2Dto3D_qm_data(pg):
         torch.tensor(map_g.node_feat['bbox3d_qy'], dtype=torch.float),
         torch.tensor(map_g.node_feat['bbox3d_qz'], dtype=torch.float),
         torch.tensor(map_g.node_feat['bbox3d_qw'], dtype=torch.float),
-        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float).abs(),
-        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float).abs(),
-        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float).abs(),
+        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float),
     ), dim=1)
 
     data['map_node_text'] = torch.tensor(map_g.node_feat['text_embs'], dtype=torch.float)

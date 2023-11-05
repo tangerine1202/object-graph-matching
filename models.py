@@ -21,6 +21,7 @@ from utils import (
     transform_bbox3d,
     corners_of_bbox3d,
     project_bbox3d_to_2d_xyxy,
+    invert_Rt,
 )
 
 if torch.backends.mps.is_available():
@@ -429,16 +430,14 @@ def compute_pose_from_2Dto3D_bbox(pred_dict, data_dict):
             R_wc_init, t_wc_init = pose_by_PnP(pts3d, pts2d, K)
         else:
             R_wc_init, t_wc_init = scipy_R.from_matrix(np.eye(3)), np.zeros(3)
-        R_cw_init, t_cw_init = R_wc_init.inv(), -R_wc_init.inv().apply(t_wc_init)
-        bbox3d = transform_bbox3d(bbox3d_world, R_cw_init, t_cw_init)
-        R_wc_refine, t_wc_refine = pose_by_minimize_bbox3d_projection(bbox3d_world, bbox_ccwh, K)
+        pose_init = np.concatenate([t_wc_init, R_wc_init.as_quat()])
+        R_wc_refine, t_wc_refine = pose_by_minimize_bbox3d_projection(bbox3d_world, bbox_ccwh, K, pose_init=pose_init)
         # combine with the initial pose
-        R_wc, t_wc = R_wc_refine * R_wc_init, t_wc_refine + R_wc_refine.apply(t_wc_init)
-        pred_pose = np.concatenate([t_wc, R_wc.as_quat()])
+        pred_pose = np.concatenate([t_wc_refine, R_wc_refine.as_quat()])
     return pred_pose
 
 
-def pose_by_PnP(pts3d, pts2d, K, allow_3points=False):
+def pose_by_PnP(pts3d, pts2d, K, algo=cv2.SOLVEPNP_SQPNP):
     assert pts3d.shape[0] >= 3
     assert pts3d.shape[0] == pts2d.shape[0]
     assert pts3d.shape[1] == 3
@@ -446,19 +445,27 @@ def pose_by_PnP(pts3d, pts2d, K, allow_3points=False):
     pts3d = pts3d.astype(float)
     pts2d = pts2d.astype(float)
     K = K.astype(float)
-    flags = cv2.SOLVEPNP_EPNP
-    if allow_3points and pts3d.shape[0] == 3:
-        flags = cv2.SOLVEPNP_SQPNP
+    # dummy pose
+    R_cw = scipy_R.from_matrix(np.eye(3))
+    t_cw = np.zeros(3)
+
+    if algo == cv2.SOLVEPNP_EPNP:
+        # FIXME: do not know why, but the order of pair in EPNP matters, and cause instability
+        warnings.warn('EPNP is not stable, please consider using ITERATIVE or SQPNP')
+    retval, rvec, tvec = cv2.solvePnP(pts3d, pts2d, K, None, flags=algo)
+    if retval:
+        R_cw = scipy_R.from_rotvec(rvec.flatten())
+        t_cw = tvec.flatten()
     else:
-        assert allow_3points or pts3d.shape[0] >= 4
-    retval, rvec, tvec = cv2.solvePnP(pts3d, pts2d, K, None, flags=flags)
-    R_cw = scipy_R.from_rotvec(rvec.flatten())
-    t_cw = tvec.flatten()
-    R_wc, t_wc = R_cw.inv(), -(R_cw.inv().apply(t_cw))
+        warnings.warn('solvePnP failed, fallback to dummy pose')
+    # TODO: consider using RANSAC and refinement also, i.e. cv::solvePnPRansac(), cv::solvePnPRefineLM()
+    # ref:https://docs.opencv.org/4.x/d5/d1f/calib3d_solvePnP.html
+
+    R_wc, t_wc = invert_Rt(R_cw, t_cw)
     return R_wc, t_wc
 
 
-def pose_by_minimize_bbox3d_projection(bbox3d, bbox_ccwh, K, max_iter=None):
+def pose_by_minimize_bbox3d_projection(bbox3d, bbox_ccwh, K, pose_init=None, max_iter=None):
     def bbox3dto2d_proj_cost_function(T_flat, bbox3d, bbox2d_xyxy, K):
         T = T_flat.reshape(4, 4)
         R, t = scipy_R.from_matrix(np.array(T[:3, :3])), T[:3, 3]
@@ -481,17 +488,23 @@ def pose_by_minimize_bbox3d_projection(bbox3d, bbox_ccwh, K, max_iter=None):
     bbox_xyxy[:, :2] -= bbox_ccwh[:, 2:] / 2
     bbox_xyxy[:, 2:] += bbox_ccwh[:, 2:] / 2
 
-    T_init_flat = np.eye(4).flatten()
+    T_init = np.eye(4)
+    if pose_init is not None:
+        R_init_wc = scipy_R.from_quat(pose_init[3:])
+        t_init_wc = pose_init[:3]
+        R_init_cw, t_init_cw = invert_Rt(R_init_wc, t_init_wc)
+        T_init[:3, :3] = R_init_cw.as_matrix()
+        T_init[:3, 3] = t_init_cw
+    T_init_flat = T_init.flatten()
     options = None if max_iter is None else {'maxiter': max_iter}
 
     result = scipy_minimize(
         bbox3dto2d_proj_cost_function, T_init_flat, args=(bbox3d, bbox_xyxy, K),
         method='L-BFGS-B', options=options)
-    # print('obj:', result.fun)
 
     T_cw = result.x.reshape(4, 4)
     R_cw, t_cw = scipy_R.from_matrix(T_cw[:3, :3]), T_cw[:3, 3]
-    R_wc, t_wc = R_cw.inv(), -R_cw.inv().apply(t_cw)
+    R_wc, t_wc = invert_Rt(R_cw, t_cw)
     # error = result.fun
     return R_wc, t_wc
 
