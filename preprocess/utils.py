@@ -103,6 +103,22 @@ def comp_bbox2d_edge_with_min_knn(df, cxcy_cols, node_ids, k=3):
     return edge_index, edge_attr
 
 
+def comp_bbox2d_dist_and_angle(bbox2d_df, xy_cols):
+    df = bbox2d_df[xy_cols]
+    cross_df = df.merge(df, how='cross', suffixes=('_src', '_dst'))
+    # distance
+    diff = cross_df[[f'{col}_dst' for col in xy_cols]].values - \
+        cross_df[[f'{col}_src' for col in xy_cols]].values  # (n*n, 2)
+    dist = np.linalg.norm(diff, axis=1).reshape(-1, 1)  # (n*n, 1)
+    # angle
+    theta = np.arctan2(diff[:, 1], diff[:, 0]).reshape(-1, 1)  # (n*n, 1)
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
+    edge_attr = pd.DataFrame(np.concatenate((dist, sin_theta, cos_theta), axis=1), columns=[
+        'bbox2d_dist', 'bbox2d_sin', 'bbox2d_cos'])  # (n*n, 3)
+    return edge_attr
+
+
 def comp_bbox3d_edge_with_min_knn(df, xyz_cols, node_ids, k=3):
     """
     df: node features DataFrame, need to contain xyz_cols
@@ -132,22 +148,6 @@ def comp_bbox3d_edge_with_min_knn(df, xyz_cols, node_ids, k=3):
     edge_attr = edge_attr.drop(columns=['src', 'dst'])
     assert edge_index.shape[0] == 2, f'edge_index.shape[0] = {edge_index.shape[0]}'
     return edge_index, edge_attr
-
-
-def comp_bbox2d_dist_and_angle(bbox2d_df, xy_cols):
-    df = bbox2d_df[xy_cols]
-    cross_df = df.merge(df, how='cross', suffixes=('_src', '_dst'))
-    # distance
-    diff = cross_df[[f'{col}_dst' for col in xy_cols]].values - \
-        cross_df[[f'{col}_src' for col in xy_cols]].values  # (n*n, 2)
-    dist = np.linalg.norm(diff, axis=1).reshape(-1, 1)  # (n*n, 1)
-    # angle
-    theta = np.arctan2(diff[:, 1], diff[:, 0]).reshape(-1, 1)  # (n*n, 1)
-    sin_theta = np.sin(theta)
-    cos_theta = np.cos(theta)
-    edge_attr = pd.DataFrame(np.concatenate((dist, sin_theta, cos_theta), axis=1), columns=[
-        'bbox2d_dist', 'bbox2d_sin', 'bbox2d_cos'])  # (n*n, 3)
-    return edge_attr
 
 
 def comp_bbox3d_dist_and_quat(bbox3d_df, xyz_cols):
