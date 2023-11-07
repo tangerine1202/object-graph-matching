@@ -28,9 +28,19 @@ import cv2
 import matplotlib.pyplot as plt
 
 # %%
-from solo2graph import MapGraph, QueryGraph
-from dataset import PairListDataset, transform_2Dto3D_qm_data, transform_3D_qm_data, transform_2D_qq_data
-from models import Model_3Dto3D, Model_2Dto2D, Model_2Dto3D, compute_pose_from_2Dto3D_bbox, pose_by_PnP
+from dataset import (
+    PairListDataset,
+    transform_2Dto3D_qm_data,
+    transform_2D_with_depth_to_3D_qm_data,
+    transform_3D_qm_data,
+    transform_2D_qq_data
+)
+from models import (
+    Model_2Dto3D,
+    Model_2D_with_depth_to_3D,
+    Model_3Dto3D,
+    Model_2Dto2D,
+)
 from losses import CustomCriterion
 from eva import compute_eval, compute_pose_error, compute_corr, compute_confusion_matrix
 from viz_utils import read_img, viz_corr
@@ -47,29 +57,32 @@ TRAIN_RATIO, EVAL_RATIO, TEST_RATIO = 0.5, 0.2, 0.3
 
 SOLO_NAME = 'poisson1r36'
 SCENE = 'SimpleOffice'
+TASK = '2DWithDepthTo3D'
 DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
 GRAPH_DIR = f'{DATA_DIR}/graph'
-TASK = '2Dto3D'
+CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}/{TASK}'
 
 if TASK == '2Dto3D':
     PAIR_FNAME = 'qm_paired_list.csv'
     MODEL = Model_2Dto3D
     TRANSFORM = transform_2Dto3D_qm_data
-    EVAL_TYPE = '3d'
+elif TASK == '2DWithDepthTo3D':
+    PAIR_FNAME = 'qm_paired_list.csv'
+    MODEL = Model_2D_with_depth_to_3D
+    TRANSFORM = transform_2D_with_depth_to_3D_qm_data
 elif TASK == '3Dto3D':
     PAIR_FNAME = 'qm_paired_list.csv'
     MODEL = Model_3Dto3D
     TRANSFORM = transform_3D_qm_data
-    EVAL_TYPE = '3d'
 elif TASK == '2Dto2D':
     PAIR_FNAME = 'qq_paired_list.csv'
     MODEL = Model_2Dto2D
     TRANSFORM = transform_2D_qq_data
-    EVAL_TYPE = '2d'
 
-CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}/{TASK}'
 if not os.path.exists(CKPT_DIR):
     os.makedirs(CKPT_DIR)
+
+print('task:', TASK)
 
 
 # %%
@@ -121,13 +134,13 @@ def train_step(model, data_dict, optimizer, criterion):
 # %%
 
 
-def eval_step(model, data_dict, criterion, eval_type):
+def eval_step(model, data_dict, criterion):
     data_dict = data_dict_to_device(data_dict, device)
     model.eval()
     with torch.no_grad():
         pred_dict = model(data_dict)
         loss = criterion(pred_dict, data_dict)
-    metrics = compute_eval(pred_dict, data_dict, eval_type=eval_type)
+    metrics = compute_eval(pred_dict, data_dict)
     return loss.item(), metrics, pred_dict
 
 
@@ -160,7 +173,7 @@ for _ in tqdm(range(TOTAL_EPOCHS)):
         with torch.no_grad():
             model.eval()
             for data_dict in eval_dl:
-                eval_loss, metrics, pred_dict = eval_step(model, data_dict, criterion, eval_type=EVAL_TYPE)
+                eval_loss, metrics, pred_dict = eval_step(model, data_dict, criterion)
                 sum_eval_loss += eval_loss
 
             for k, v in metrics.items():
@@ -215,19 +228,16 @@ gid2pred = {}
 cnt = 0
 model.eval()
 for data_dict in tqdm(test_dl):
-    test_loss, metrics, pred_dict = eval_step(model, data_dict, criterion, eval_type=EVAL_TYPE)
+    test_loss, metrics, pred_dict = eval_step(model, data_dict, criterion)
     sum_test_loss += test_loss
 
-    # if data_dict['e1i'].shape[1] < 5:
-    #     continue
-
-    g1_step = data_dict['qry_step'][0].item()
-    if g1_step not in gid2pred:
-        gid2pred[g1_step] = {'pred': [pred_dict], 'data': [data_dict], 'eva': [metrics]}
-    else:
-        gid2pred[g1_step]['pred'].append(pred_dict)
-        gid2pred[g1_step]['data'].append(data_dict)
-        gid2pred[g1_step]['eva'].append(metrics)
+    # g1_step = data_dict['qry_step'][0].item()
+    # if g1_step not in gid2pred:
+    #     gid2pred[g1_step] = {'pred': [pred_dict], 'data': [data_dict], 'eva': [metrics]}
+    # else:
+    #     gid2pred[g1_step]['pred'].append(pred_dict)
+    #     gid2pred[g1_step]['data'].append(data_dict)
+    #     gid2pred[g1_step]['eva'].append(metrics)
 
     for k, v in metrics.items():
         if k not in metrics_seq:
@@ -245,12 +255,14 @@ for k, v in metrics_seq.items():
     print(f'{k:>15}: {np.mean(v):8.4f} ± {np.std(v):8.4f}, median {np.median(v):.4f}')
 
 
-mask_5cm = np.array(metrics_seq['t_rmse']) < 0.05
-mask_10cm = np.array(metrics_seq['t_rmse']) < 0.1
-mask_5deg = np.array(metrics_seq['r_err']) < 5
-mask_10deg = np.array(metrics_seq['r_err']) < 10
+pose_sources = ['pose', 'pose_from_2D', 'pose_from_3D']
+for src in pose_sources:
+    mask_5cm = np.array(metrics_seq[f'{src}_t_rmse']) < 0.05
+    mask_10cm = np.array(metrics_seq[f'{src}_t_rmse']) < 0.1
+    mask_5deg = np.array(metrics_seq[f'{src}_r_err']) < 5
+    mask_10deg = np.array(metrics_seq[f'{src}_r_err']) < 10
 
-mask_5cm5deg = np.logical_and(mask_5cm, mask_5deg)
-mask_10cm5deg = np.logical_and(mask_10cm, mask_5deg)
-print(f'5cm/5deg: {np.sum(mask_5cm5deg) / len(test_ds):.4f}')
-print(f'10cm/5deg: {np.sum(mask_10cm5deg) / len(test_ds):.4f}')
+    mask_5cm5deg = np.logical_and(mask_5cm, mask_5deg)
+    mask_10cm5deg = np.logical_and(mask_10cm, mask_5deg)
+    print(f'{src}_5cm/5deg: {np.sum(mask_5cm5deg) / len(test_ds):.4f}')
+    print(f'{src}_10cm/5deg: {np.sum(mask_10cm5deg) / len(test_ds):.4f}')

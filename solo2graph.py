@@ -1,5 +1,6 @@
 import os
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '1'
 import argparse
 import glob
 import copy
@@ -9,6 +10,7 @@ import shutil
 
 from tqdm.auto import tqdm
 
+import cv2
 from scipy.spatial.transform import Rotation as scipy_R
 import numpy as np
 import pandas as pd
@@ -19,7 +21,6 @@ from preprocess import MapGraph, QueryGraph
 from utils import (
     comp_graph_overlap,
     transform_bbox3d,
-    corners_of_bbox3d,
     invert_Rt
 )
 from preprocess.utils import (
@@ -27,6 +28,13 @@ from preprocess.utils import (
     comp_bbox3d_edge_with_min_knn,
     comp_bbox2d_edge_with_min_knn,
 )
+
+
+def read_depth(step, data_dir):
+    path = f'{data_dir}/depth/step{step}.exr'
+    depth = cv2.imread(path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    depth = depth[:, :, 2]
+    return depth
 
 
 def gen_map_graph(f, solo, edge3d_k=3):
@@ -84,7 +92,7 @@ def frame_to_map3d_node(f, solo):
     map_df = pd.concat((map_df, world_bbox3d_t_df, world_bbox3d_q_df, world_bbox3d_s_df), axis=1)
     map_df = map_df.drop(columns=['object_translation', 'object_rotation', 'object_size'])
 
-    # rename instance id after merging tabel
+    # rename instance id after merging label
     map_df = map_df.rename(columns={'instanceId': 'inst_id'})
 
     # semantic label
@@ -142,14 +150,20 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
         return None
     # edge 3d
     node_ids = data['node_ids']
-    xyz_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
-    bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
-    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_cols, node_ids, k=edge3d_k)
+    xyz_from_2d_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
+    bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_from_2d_cols})
+    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_from_2d_cols, node_ids, k=edge3d_k)
     # edge 2d
     node_ids = data['node_ids']
     cxcy_cols = ['bbox_cx', 'bbox_cy']
     bbox2d_cxcy_df = pd.DataFrame({k: data['features'][k][:, 0] for k in cxcy_cols})
     edge_index_2d, edge_attr_2d = comp_bbox2d_edge_with_min_knn(bbox2d_cxcy_df, cxcy_cols, node_ids, k=edge2d_k)
+
+    # 3d from bbox2d and depth
+    xyz_from_2d_cols = ['3d_from_2d_tx', '3d_from_2d_ty', '3d_from_2d_tz']
+    t3d_from_2d_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_from_2d_cols})
+    edge_index_3d_from_2d, edge_attr_3d_from_2d = comp_bbox3d_edge_with_min_knn(
+        t3d_from_2d_df, xyz_from_2d_cols, node_ids, k=edge3d_k)
 
     data.update({
         'edge': {
@@ -160,7 +174,11 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
             '3d': {
                 'index': edge_index_3d,
                 'attr': edge_attr_3d,
-            }
+            },
+            '3d_from_2d': {
+                'index': edge_index_3d_from_2d,
+                'attr': edge_attr_3d_from_2d,
+            },
         }
     })
     return QueryGraph(data)
@@ -188,6 +206,10 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     meta = metrics['metadata']
     env_meta = meta.env_metadata
     meta_df = meta.instances_df
+
+    camera_intrinsics = get_camera_intrinsics(cap, env_meta)
+    # hFOV = env_meta['camera']['horizontalFOV']
+    # vFOV = env_meta['camera']['verticalFOV']
 
     # FIXME: skip frames with no instance
     if not inst.has_instance:
@@ -227,6 +249,20 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     #     'bbox3d_sx', 'bbox3d_sy', 'bbox3d_sz'], index=query_df.index)
     # bbox3d_df.update(local_bbox3d_s_df)
 
+    # depth of bbox center
+    depth = read_depth(step, data_path)
+    bbox_depth = np.asarray([depth[cy, cx] for cx, cy in zip(
+        bbox_df['cx'].values.astype(int), bbox_df['cy'].values.astype(int))])
+    z_from_2d = bbox_depth
+    w_residual = bbox_df['cx'] - cap.dimension[0] / 2
+    h_residual = bbox_df['cy'] - cap.dimension[1] / 2
+    x_from_2d = z_from_2d * w_residual / camera_intrinsics[0, 0]
+    y_from_2d = z_from_2d * h_residual / camera_intrinsics[1, 1]
+    xyz_from_2d_cols = ['tx', 'ty', 'tz']
+    bbox3d_from_2d_df = pd.DataFrame(np.vstack((x_from_2d, y_from_2d, z_from_2d)).T, columns=xyz_from_2d_cols)
+    bbox3d_from_2d_df['instanceId'] = bbox_df['instanceId']
+    bbox3d_from_2d_df = bbox3d_from_2d_df.set_index('instanceId', drop=True)
+
     # merge annotations
     inst_df_for_merge = inst_df.copy() \
         .drop(columns=['labelName', 'labelId', 'color']) \
@@ -241,9 +277,15 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     #     .drop(columns=['labelName', 'labelId']) \
     #     .add_prefix('bbox3d_') \
     #     .rename(columns={'bbox3d_instanceId': 'instanceId'})
+    # bbox3d from 2d
+    bbox3d_from_2d_df_for_merge = bbox3d_from_2d_df.copy() \
+        .add_prefix('3d_from_2d_') \
+        .rename(columns={'3d_from_2d_instanceId': 'instanceId'})
     query_df = pd.merge(query_df, inst_df_for_merge, how='inner', left_on='instanceId',
                         right_on='instanceId', suffixes=('', '_duplicated'))
     query_df = pd.merge(query_df, bbox_df_for_merge, how='inner', left_on='instanceId',
+                        right_on='instanceId', suffixes=('', '_duplicated'))
+    query_df = pd.merge(query_df, bbox3d_from_2d_df_for_merge, how='inner', left_on='instanceId',
                         right_on='instanceId', suffixes=('', '_duplicated'))
     # NOTE: compute bbox3d from world bbox3d
     # query_df = pd.merge(query_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
@@ -285,6 +327,8 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
         'step': f.step,
         'camera_pose': cap.camera_pose,
         'camera_intrinsics': get_camera_intrinsics(cap, env_meta),
+        'camera_hFOV': env_meta['camera']['horizontalFOV'],
+        'camera_vFOV': env_meta['camera']['verticalFOV'],
         'img_size': cap.dimension,
     }
 
@@ -326,7 +370,7 @@ if __name__ == '__main__':
                         help='KNN edge for 3d query graph')
     parser.add_argument('--map-edge3d-k',
                         type=int,
-                        default=-3,
+                        default=3,
                         help='KNN edge for 3d map graph')
 
     # map graph

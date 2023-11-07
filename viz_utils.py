@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import cv2
-from solo2graph import MapGraph, QueryGraph
+from preprocess import QueryGraph, MapGraph
 
 from eva import compute_corr
 

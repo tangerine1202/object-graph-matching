@@ -131,12 +131,10 @@ def transform_2Dto3D_qm_data(pg):
         torch.tensor(qry_g.node_feat['bbox_h'], dtype=torch.float),
         torch.tensor(qry_g.node_feat['bbox_w'] * qry_g.node_feat['bbox_h'], dtype=torch.float) / (320 ** 2),  # size
     ), dim=1)
-
     data['qry_node_text'] = torch.tensor(qry_g.node_feat['text_embs'], dtype=torch.float)
     data['qry_node_norm_text'] = torch.tensor(qry_g.node_feat['norm_text_embs'], dtype=torch.float)
-    # # edge attr
+    # edge
     data['qry_edge_index'] = torch.tensor(qry_g.edge_index['2d'].values, dtype=torch.long)
-    # # edge index
     data['qry_edge_attr'] = torch.tensor(qry_g.edge_attr['2d'].values, dtype=torch.float)
     data['qry_edge_attr'][:, 0] /= np.sqrt(320)
 
@@ -148,6 +146,64 @@ def transform_2Dto3D_qm_data(pg):
     data['e2j'] = torch.tensor(pg.e2j, dtype=torch.long)
 
     data['qry_step'] = torch.tensor(qry_g.step, dtype=torch.long)
+    data['qry_img_size'] = torch.tensor(qry_g.img_size, dtype=torch.long)
+    data['qry_camera_pose'] = torch.tensor(qry_g.camera_pose, dtype=torch.float)
+    data['qry_camera_intrinsics'] = torch.tensor(qry_g.camera_intrinsics, dtype=torch.float)
+    return data
+
+
+def transform_2D_with_depth_to_3D_qm_data(pg):
+    data = {}
+    qry_g = pg.g1  # 2D
+    map_g = pg.g2  # 3D
+
+    # 3D
+    data['map_node_bbox3d'] = torch.cat((
+        torch.tensor(map_g.node_feat['bbox3d_tx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_ty'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_tz'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qy'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qz'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qw'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float),
+    ), dim=1)
+    data['map_node_text'] = torch.tensor(map_g.node_feat['text_embs'], dtype=torch.float)
+    data['map_node_norm_text'] = torch.tensor(map_g.node_feat['norm_text_embs'], dtype=torch.float)
+    # edge
+    data['map_edge_index'] = torch.tensor(map_g.edge_index['3d'].values, dtype=torch.long)
+    data['map_edge_attr'] = torch.tensor(map_g.edge_attr['3d'].values, dtype=torch.float)
+
+    # 2D
+    data['qry_node_position'] = torch.cat((
+        torch.tensor(qry_g.node_feat['bbox_cx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_cy'], dtype=torch.float)
+    ), dim=1)
+    data['qry_node_bbox'] = torch.cat((
+        torch.tensor(qry_g.node_feat['bbox_cx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_cy'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_w'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_h'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox_w'] * qry_g.node_feat['bbox_h'], dtype=torch.float) / (320 ** 2),  # size
+    ), dim=1)
+    data['qry_node_text'] = torch.tensor(qry_g.node_feat['text_embs'], dtype=torch.float)
+    data['qry_node_norm_text'] = torch.tensor(qry_g.node_feat['norm_text_embs'], dtype=torch.float)
+
+    # edge
+    data['qry_edge_index'] = torch.tensor(qry_g.edge_index['3d'].values, dtype=torch.long)
+    data['qry_edge_attr'] = torch.tensor(qry_g.edge_attr['3d'].values, dtype=torch.float)
+
+    data['n1'] = torch.tensor(pg.n1, dtype=torch.long)
+    data['n2'] = torch.tensor(pg.n2, dtype=torch.long)
+    data['e1i'] = torch.tensor(pg.e1i, dtype=torch.long)
+    data['e2i'] = torch.tensor(pg.e2i, dtype=torch.long)
+    data['e1j'] = torch.tensor(pg.e1j, dtype=torch.long)
+    data['e2j'] = torch.tensor(pg.e2j, dtype=torch.long)
+
+    data['qry_step'] = torch.tensor(qry_g.step, dtype=torch.long)
+    data['qry_img_size'] = torch.tensor(qry_g.img_size, dtype=torch.long)
     data['qry_camera_pose'] = torch.tensor(qry_g.camera_pose, dtype=torch.float)
     data['qry_camera_intrinsics'] = torch.tensor(qry_g.camera_intrinsics, dtype=torch.float)
     return data

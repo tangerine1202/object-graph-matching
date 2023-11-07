@@ -3,7 +3,7 @@ import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
 
 
-def compute_eval(pred_dict, data_dict, eval_type):
+def compute_eval(pred_dict, data_dict):
     metrics = {}
 
     # confusion_matrix
@@ -13,12 +13,12 @@ def compute_eval(pred_dict, data_dict, eval_type):
     metrics['f1'] = conf_matrix['f1']
 
     gt_pose = data_dict['qry_camera_pose'][0].cpu().numpy()
-    if eval_type == '3d':
-        if 'pose' in pred_dict and pred_dict['pose'] is not None:
-            pred_pose = pred_dict['pose']
+    for k, v in pred_dict.items():
+        if k.startswith('pose') and v is not None:
+            pred_pose = pred_dict[k]
             t_rmse, r_err = compute_pose_error(pred_pose, gt_pose)
-            metrics['t_rmse'] = t_rmse
-            metrics['r_err'] = r_err
+            metrics[f'{k}_t_rmse'] = t_rmse
+            metrics[f'{k}_r_err'] = r_err
 
     # upcast metric to float to address None value
     for k in metrics:
