@@ -190,6 +190,12 @@ def transform_2D_with_depth_to_3D_qm_data(pg):
     ), dim=1)
     data['qry_node_text'] = torch.tensor(qry_g.node_feat['text_embs'], dtype=torch.float)
     data['qry_node_norm_text'] = torch.tensor(qry_g.node_feat['norm_text_embs'], dtype=torch.float)
+    # 3D from 2D
+    data['qry_node_bbox3d'] = torch.cat((
+        torch.tensor(qry_g.node_feat['bbox3d_tx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_ty'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_tz'], dtype=torch.float),
+    ), dim=1)
 
     # edge
     data['qry_edge_index'] = torch.tensor(qry_g.edge_index['3d'].values, dtype=torch.long)
@@ -214,27 +220,43 @@ def transform_3D_qm_data(pg):
     qry_g = pg.g1
     map_g = pg.g2
 
-    # node attr
-    data['node_bbox3d'] = torch.cat((
-        torch.tensor(pg.node_feat['bbox3d_tx'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_ty'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_tz'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_qx'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_qy'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_qz'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_qw'], dtype=torch.float),
-        torch.tensor(pg.node_feat['bbox3d_sx'], dtype=torch.float).abs(),
-        torch.tensor(pg.node_feat['bbox3d_sy'], dtype=torch.float).abs(),
-        torch.tensor(pg.node_feat['bbox3d_sz'], dtype=torch.float).abs(),
+    # map
+    data['map_node_bbox3d'] = torch.cat((
+        torch.tensor(map_g.node_feat['bbox3d_tx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_ty'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_tz'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qy'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qz'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_qw'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sx'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sy'], dtype=torch.float),
+        torch.tensor(map_g.node_feat['bbox3d_sz'], dtype=torch.float),
     ), dim=1)
+    data['map_node_text'] = torch.tensor(map_g.node_feat['text_embs'], dtype=torch.float)
+    data['map_node_norm_text'] = torch.tensor(map_g.node_feat['norm_text_embs'], dtype=torch.float)
+    # edge
+    data['map_edge_index'] = torch.tensor(map_g.edge_index['3d'].values, dtype=torch.long)
+    data['map_edge_attr'] = torch.tensor(map_g.edge_attr['3d'].values, dtype=torch.float)
 
-    data['node_text'] = torch.tensor(pg.node_feat['text_embs'], dtype=torch.float)
-    data['node_norm_text'] = torch.tensor(pg.node_feat['norm_text_embs'], dtype=torch.float)
-
-    # edge attr
-    data['edge_index'] = torch.tensor(pg.edge_index['3d'], dtype=torch.long)
-    # edge index
-    data['edge_attr'] = torch.tensor(pg.edge_attr['3d'], dtype=torch.float)
+    # qry
+    data['qry_node_bbox3d'] = torch.cat((
+        torch.tensor(qry_g.node_feat['bbox3d_tx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_ty'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_tz'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_qx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_qy'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_qz'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_qw'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_sx'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_sy'], dtype=torch.float),
+        torch.tensor(qry_g.node_feat['bbox3d_sz'], dtype=torch.float),
+    ), dim=1)
+    data['qry_node_text'] = torch.tensor(qry_g.node_feat['text_embs'], dtype=torch.float)
+    data['qry_node_norm_text'] = torch.tensor(qry_g.node_feat['norm_text_embs'], dtype=torch.float)
+    # edge
+    data['qry_edge_index'] = torch.tensor(qry_g.edge_index['3d'].values, dtype=torch.long)
+    data['qry_edge_attr'] = torch.tensor(qry_g.edge_attr['3d'].values, dtype=torch.float)
 
     data['n1'] = torch.tensor(pg.n1, dtype=torch.long)
     data['n2'] = torch.tensor(pg.n2, dtype=torch.long)

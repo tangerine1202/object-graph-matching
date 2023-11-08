@@ -148,22 +148,19 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
     valid, data = frame_to_query_node(f, solo, min_bbox_size=min_bbox_size)
     if not valid:
         return None
+    node_ids = data['node_ids']
     # edge 3d
-    node_ids = data['node_ids']
-    xyz_from_2d_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
-    bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_from_2d_cols})
-    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_from_2d_cols, node_ids, k=edge3d_k)
+    # xyz_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
+    # bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
+    # edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_cols, node_ids, k=edge3d_k)
     # edge 2d
-    node_ids = data['node_ids']
     cxcy_cols = ['bbox_cx', 'bbox_cy']
     bbox2d_cxcy_df = pd.DataFrame({k: data['features'][k][:, 0] for k in cxcy_cols})
     edge_index_2d, edge_attr_2d = comp_bbox2d_edge_with_min_knn(bbox2d_cxcy_df, cxcy_cols, node_ids, k=edge2d_k)
-
-    # 3d from bbox2d and depth
-    xyz_from_2d_cols = ['3d_from_2d_tx', '3d_from_2d_ty', '3d_from_2d_tz']
-    t3d_from_2d_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_from_2d_cols})
-    edge_index_3d_from_2d, edge_attr_3d_from_2d = comp_bbox3d_edge_with_min_knn(
-        t3d_from_2d_df, xyz_from_2d_cols, node_ids, k=edge3d_k)
+    # edge 3d from depth
+    xyz_cols = ['bbox3d_from_depth_tx', 'bbox3d_from_depth_ty', 'bbox3d_from_depth_tz']
+    bbox3d_from_depth_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
+    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_from_depth_t_df, xyz_cols, node_ids, k=edge3d_k)
 
     data.update({
         'edge': {
@@ -174,10 +171,6 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
             '3d': {
                 'index': edge_index_3d,
                 'attr': edge_attr_3d,
-            },
-            '3d_from_2d': {
-                'index': edge_index_3d_from_2d,
-                'attr': edge_attr_3d_from_2d,
             },
         }
     })
@@ -277,10 +270,10 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     #     .drop(columns=['labelName', 'labelId']) \
     #     .add_prefix('bbox3d_') \
     #     .rename(columns={'bbox3d_instanceId': 'instanceId'})
-    # bbox3d from 2d
+    # NOTE: bbox3d from 2d
     bbox3d_from_2d_df_for_merge = bbox3d_from_2d_df.copy() \
-        .add_prefix('3d_from_2d_') \
-        .rename(columns={'3d_from_2d_instanceId': 'instanceId'})
+        .add_prefix('bbox3d_from_depth_') \
+        .rename(columns={'bbox3d_from_depth_instanceId': 'instanceId'})
     query_df = pd.merge(query_df, inst_df_for_merge, how='inner', left_on='instanceId',
                         right_on='instanceId', suffixes=('', '_duplicated'))
     query_df = pd.merge(query_df, bbox_df_for_merge, how='inner', left_on='instanceId',

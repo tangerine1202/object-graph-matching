@@ -294,8 +294,8 @@ class Model_2D_with_depth_to_3D(nn.Module):
             # compute pose
             pred_pose_2d = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
             pred_dict['pose_from_2D'] = pred_pose_2d
-            # pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
-            # pred_dict['pose_from_3D'] = pred_pose_3d
+            pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
+            pred_dict['pose_from_3D'] = pred_pose_3d
 
         return pred_dict
 
@@ -310,19 +310,19 @@ class Model_3Dto3D(nn.Module):
         self.match_threshold = match_threshold
         self.bin_score = torch.tensor(bin_score).to(device)
 
-        self.bbox3d_encoder = nn.Sequential(
-            nn.InstanceNorm1d(10),
-            nn.Conv1d(10, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
         self.txt_encoder = nn.Sequential(
             # nn.InstanceNorm1d(768),
             nn.Conv1d(768, 128, kernel_size=1, bias=True),
             nn.InstanceNorm1d(128),
             nn.ReLU(),
             nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
+        )
+        self.bbox3d_encoder = nn.Sequential(
+            nn.InstanceNorm1d(10),
+            nn.Conv1d(10, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(64),
+            nn.ReLU(),
+            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.edge_attr_encoder = nn.Sequential(
             # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
@@ -340,23 +340,41 @@ class Model_3Dto3D(nn.Module):
         ])
 
     def forward(self, data_dict):
-        edge_index = data_dict['edge_index'].squeeze(0)
-        edge_attr = data_dict['edge_attr']
+        # 3D map
+        map_edge_index = data_dict['map_edge_index'].squeeze(0)
+        map_edge_attr = data_dict['map_edge_attr']
+        map_node_bbox3d = data_dict['map_node_bbox3d']
+        map_node_text = data_dict['map_node_text']
 
-        node_bbox3d = data_dict['node_bbox3d']
-        node_text = data_dict['node_text']
-
-        node_bbox3d = self.bbox3d_encoder(node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        node_text = self.txt_encoder(node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-
-        node_attr = torch.cat((
-            node_bbox3d,
-            node_text
+        map_edge_attr = self.edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        map_node_bbox3d = self.bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        map_node_attr = torch.cat((
+            map_node_bbox3d,
+            map_node_text
         ), dim=1)
+        map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
 
-        edge_attr = self.edge_attr_encoder(edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        # fusion
-        node_attr = self.layers(node_attr, edge_index, edge_attr).unsqueeze(0)
+        # 3D qry
+        qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
+        qry_edge_attr = data_dict['qry_edge_attr']
+        qry_node_bbox3d = data_dict['qry_node_bbox3d']
+        qry_node_text = data_dict['qry_node_text']
+
+        qry_edge_attr = self.edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        qry_node_bbox3d = self.bbox3d_encoder(qry_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+        qry_node_attr = torch.cat((
+            qry_node_bbox3d,
+            qry_node_text
+        ), dim=1)
+        qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
+
+        # concat qry and map nodes
+        node_attr = torch.cat((
+            qry_node_attr,
+            map_node_attr
+        ), dim=1)
 
         # matching (SuperGlue method)
         # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
@@ -652,11 +670,12 @@ def compute_pose_from_bbox3d(pred_dict, data_dict):
     if len(pred_e1i) == 0:
         pred_pose = None
     else:
-        if isinstance(data_dict['node_bbox3d'], torch.Tensor):
-            bbox3d_t1 = data_dict['node_bbox3d'][0].cpu().numpy()
-            bbox3d_t2 = data_dict['node_bbox3d'][0].cpu().numpy()
-        bbox3d_t1 = bbox3d_t1[:data_dict['n1'].item(), :3]
-        bbox3d_t2 = bbox3d_t2[data_dict['n1'].item():, :3]
+        if isinstance(data_dict['qry_node_bbox3d'], torch.Tensor):
+            bbox3d_t1 = data_dict['qry_node_bbox3d'][0].cpu().numpy()
+        if isinstance(data_dict['map_node_bbox3d'], torch.Tensor):
+            bbox3d_t2 = data_dict['map_node_bbox3d'][0].cpu().numpy()
+        bbox3d_t1 = bbox3d_t1[:, :3]
+        bbox3d_t2 = bbox3d_t2[:, :3]
         pred_R, pred_t = pose_by_ICP_with_corrs_init(bbox3d_t1, bbox3d_t2, corrs)
         pred_pose = np.concatenate([pred_t, pred_R.as_quat()])
     return pred_pose

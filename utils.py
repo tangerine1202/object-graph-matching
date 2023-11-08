@@ -38,7 +38,7 @@ def transform_bbox3d(bbox3d, R, t):
     t_local = R.apply(t_local) + t
     # transform q_local with R
     q_local = np.asarray([(R * scipy_R.from_quat(q)).as_quat() for q in q_local])
-    s_local = R.apply(s_local)
+    s_local = s_local.copy()
     bbox3d_local = np.concatenate([t_local, q_local, s_local], axis=1)
     return bbox3d_local
 
