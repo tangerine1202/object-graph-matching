@@ -25,14 +25,12 @@ class MapGraph:
         # node
         self.node_feat = self.data['features']
         # edge
-        edge_index_3d, = self.data['edge']['3d']['index'],
-        edge_attr_3d = self.data['edge']['3d']['attr']
-        self.edge_index = {
-            '3d': edge_index_3d
-        }
-        self.edge_attr = {
-            '3d': edge_attr_3d
-        }
+        self.edge_index = {}
+        self.edge_attr = {}
+        for k in self.data['edge'].keys():
+            edge_index, edge_attr = self.data['edge'][k]['index'], self.data['edge'][k]['attr']
+            self.edge_index[k] = edge_index
+            self.edge_attr[k] = edge_attr
 
     def __len__(self):
         return len(self.node_ids)
@@ -56,18 +54,12 @@ class QueryGraph:
         # node
         self.node_feat = self.data['features']
         # edge
-        edge_index_2d = self.data['edge']['2d']['index']
-        edge_index_3d = self.data['edge']['3d']['index']
-        edge_attr_2d = self.data['edge']['2d']['attr']
-        edge_attr_3d = self.data['edge']['3d']['attr']
-        self.edge_index = {
-            '2d': edge_index_2d,
-            '3d': edge_index_3d,
-        }
-        self.edge_attr = {
-            '2d': edge_attr_2d,
-            '3d': edge_attr_3d,
-        }
+        self.edge_index = {}
+        self.edge_attr = {}
+        for k in self.data['edge'].keys():
+            edge_index, edge_attr = self.data['edge'][k]['index'], self.data['edge'][k]['attr']
+            self.edge_index[k] = edge_index
+            self.edge_attr[k] = edge_attr
 
     def __len__(self):
         return len(self.node_ids)

@@ -150,9 +150,9 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
         return None
     node_ids = data['node_ids']
     # edge 3d
-    # xyz_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
-    # bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
-    # edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_cols, node_ids, k=edge3d_k)
+    xyz_cols = ['bbox3d_tx', 'bbox3d_ty', 'bbox3d_tz']
+    bbox3d_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
+    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_t_df, xyz_cols, node_ids, k=edge3d_k)
     # edge 2d
     cxcy_cols = ['bbox_cx', 'bbox_cy']
     bbox2d_cxcy_df = pd.DataFrame({k: data['features'][k][:, 0] for k in cxcy_cols})
@@ -160,7 +160,8 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
     # edge 3d from depth
     xyz_cols = ['bbox3d_from_depth_tx', 'bbox3d_from_depth_ty', 'bbox3d_from_depth_tz']
     bbox3d_from_depth_t_df = pd.DataFrame({k: data['features'][k][:, 0] for k in xyz_cols})
-    edge_index_3d, edge_attr_3d = comp_bbox3d_edge_with_min_knn(bbox3d_from_depth_t_df, xyz_cols, node_ids, k=edge3d_k)
+    edge_index_3d_from_depth, edge_attr_3d_from_depth = comp_bbox3d_edge_with_min_knn(
+        bbox3d_from_depth_t_df, xyz_cols, node_ids, k=edge3d_k)
 
     data.update({
         'edge': {
@@ -171,6 +172,10 @@ def gen_query_graph(f, solo, edge2d_k, edge3d_k, min_bbox_size=0):
             '3d': {
                 'index': edge_index_3d,
                 'attr': edge_attr_3d,
+            },
+            '3d_from_depth': {
+                'index': edge_index_3d_from_depth,
+                'attr': edge_attr_3d_from_depth,
             },
         }
     })
@@ -265,7 +270,7 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
         .drop(columns=['labelName', 'labelId']) \
         .add_prefix('bbox_')
     bbox_df_for_merge['instanceId'] = bbox_df_for_merge['bbox_instanceId']
-    # NOTE: compute bbox3d from world bbox3d
+    # NOTE: local bbox3d from perception
     # bbox3d_df_for_merge = bbox3d_df.copy() \
     #     .drop(columns=['labelName', 'labelId']) \
     #     .add_prefix('bbox3d_') \
@@ -280,7 +285,7 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
                         right_on='instanceId', suffixes=('', '_duplicated'))
     query_df = pd.merge(query_df, bbox3d_from_2d_df_for_merge, how='inner', left_on='instanceId',
                         right_on='instanceId', suffixes=('', '_duplicated'))
-    # NOTE: compute bbox3d from world bbox3d
+    # NOTE: local bbox3d from perception
     # query_df = pd.merge(query_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
     #                     right_on='instanceId', suffixes=('', '_duplicated'))
     query_df = query_df.rename(columns={'instanceId': 'inst_id'})

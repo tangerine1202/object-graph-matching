@@ -31,13 +31,15 @@ import matplotlib.pyplot as plt
 from dataset import (
     PairListDataset,
     transform_2Dto3D_qm_data,
-    transform_2D_with_depth_to_3D_qm_data,
+    transform_2DNode3DEdge_to_3D_qm_data,
+    transform_3DNode3DEdge_to_3D_qm_data,
     transform_3D_qm_data,
     transform_2D_qq_data
 )
 from models import (
     Model_2Dto3D,
-    Model_2D_with_depth_to_3D,
+    Model_2DNode3DEdge_to_3D,
+    Model_3DNode3DEdge_to_3D,
     Model_3Dto3D,
     Model_2Dto2D,
 )
@@ -57,7 +59,7 @@ TRAIN_RATIO, EVAL_RATIO, TEST_RATIO = 0.5, 0.2, 0.3
 
 SOLO_NAME = 'poisson1r36'
 SCENE = 'SimpleOffice'
-TASK = '2DWithDepthTo3D'
+TASK = '3DNode3DEdge_to_3D'
 DATA_DIR = f'data/{SCENE}/{SOLO_NAME}'
 GRAPH_DIR = f'{DATA_DIR}/graph'
 CKPT_DIR = f'ckpt/{SCENE}/{SOLO_NAME}/{TASK}'
@@ -66,10 +68,14 @@ if TASK == '2Dto3D':
     PAIR_FNAME = 'qm_paired_list.csv'
     MODEL = Model_2Dto3D
     TRANSFORM = transform_2Dto3D_qm_data
-elif TASK == '2DWithDepthTo3D':
+elif TASK == '2DNode3DEdge_to_3D':
     PAIR_FNAME = 'qm_paired_list.csv'
-    MODEL = Model_2D_with_depth_to_3D
-    TRANSFORM = transform_2D_with_depth_to_3D_qm_data
+    MODEL = Model_2DNode3DEdge_to_3D
+    TRANSFORM = transform_2DNode3DEdge_to_3D_qm_data
+elif TASK == '3DNode3DEdge_to_3D':
+    PAIR_FNAME = 'qm_paired_list.csv'
+    MODEL = Model_3DNode3DEdge_to_3D
+    TRANSFORM = transform_3DNode3DEdge_to_3D_qm_data
 elif TASK == '3Dto3D':
     PAIR_FNAME = 'qm_paired_list.csv'
     MODEL = Model_3Dto3D
@@ -255,7 +261,11 @@ for k, v in metrics_seq.items():
     print(f'{k:>15}: {np.mean(v):8.4f} ± {np.std(v):8.4f}, median {np.median(v):.4f}')
 
 
-pose_sources = ['pose', 'pose_from_2D', 'pose_from_3D']
+pose_sources = [
+    # 'pose',
+    # 'pose_from_2D',
+    'pose_from_3D',
+]
 for src in pose_sources:
     mask_5cm = np.array(metrics_seq[f'{src}_t_rmse']) < 0.05
     mask_10cm = np.array(metrics_seq[f'{src}_t_rmse']) < 0.1
@@ -264,5 +274,5 @@ for src in pose_sources:
 
     mask_5cm5deg = np.logical_and(mask_5cm, mask_5deg)
     mask_10cm5deg = np.logical_and(mask_10cm, mask_5deg)
-    print(f'{src}_5cm/5deg: {np.sum(mask_5cm5deg) / len(test_ds):.4f}')
-    print(f'{src}_10cm/5deg: {np.sum(mask_10cm5deg) / len(test_ds):.4f}')
+    print(f'{src}  5cm/5deg: {np.sum(mask_5cm5deg) / len(test_ds):.4f}')
+    print(f'{src} 10cm/5deg: {np.sum(mask_10cm5deg) / len(test_ds):.4f}')
