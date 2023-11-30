@@ -15,7 +15,6 @@ from scipy.spatial.transform import Rotation as scipy_R
 import numpy as np
 import pandas as pd
 
-
 from solo_tool import Solo
 from preprocess import MapGraph, QueryGraph
 from utils import (
@@ -24,10 +23,33 @@ from utils import (
     invert_Rt
 )
 from preprocess.utils import (
+    GloveFeatureExtractor,
     LAVISFeatureExtractor,
     comp_bbox3d_edge_with_min_knn,
     comp_bbox2d_edge_with_min_knn,
 )
+
+
+def encode_text_features(label_names, label_ids, type, n_labels=None):
+    if type == 'blipv2':
+        feats = []
+        for label_name in label_names:
+            text_features = lavis_feature_extractor.extract_text_features(label_name)
+            text_feature = text_features['text']
+            # norm_text_feature = text_features['norm_text']
+            feats.append(text_feature)
+        feats = np.vstack(feats)
+    elif type == 'glove':
+        feats = []
+        for label_name in label_names:
+            text_feature = glove_feature_extractor.extract_feature(label_name)
+            feats.append(text_feature)
+        feats = np.vstack(feats)
+    elif type == 'onehot':
+        assert n_labels is not None
+        feats = np.zeros((len(label_ids), n_labels))
+        feats[np.arange(len(label_ids)), label_ids - 1] = 1
+    return feats
 
 
 def read_depth(step, data_dir):
@@ -95,20 +117,16 @@ def frame_to_map3d_node(f, solo):
     # rename instance id after merging label
     map_df = map_df.rename(columns={'instanceId': 'inst_id'})
 
-    # semantic label
-    embs = {}
-    for _, obj in map_df.iterrows():
-        label_name = obj['label_name']
-        text_features = lavis_feature_extractor.extract_text_features(label_name)
-        for k, v in text_features.items():
-            if k not in embs:
-                embs[k] = []
-            embs[k].append(v)
-    embs = {k: np.vstack(v) for k, v in embs.items()}
+    blip_label_embs = encode_text_features(map_df['label_name'].values, map_df['label_id'].values, 'blipv2')
+    glove_label_embs = encode_text_features(map_df['label_name'].values, map_df['label_id'].values, 'glove')
+    onehot_label_embs = encode_text_features(
+        map_df['label_name'].values, map_df['label_id'].values, 'onehot', n_labels=27)
 
     features = {
         **{k: np.asarray(v).reshape(-1, 1) for k, v in map_df.items()},
-        **{f'{k}_embs': v for k, v in embs.items()}
+        'blip_label_embs': blip_label_embs,
+        'glove_label_embs': glove_label_embs,
+        'onehot_label_embs': onehot_label_embs,
     }
 
     node_ids = map_df.index.to_list()
@@ -264,12 +282,12 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     # merge annotations
     inst_df_for_merge = inst_df.copy() \
         .drop(columns=['labelName', 'labelId', 'color']) \
-        .add_prefix('inst_')
-    inst_df_for_merge['instanceId'] = inst_df_for_merge['inst_instanceId']
+        .add_prefix('inst_') \
+        .rename(columns={'inst_instanceId': 'instanceId'})
     bbox_df_for_merge = bbox_df.copy() \
         .drop(columns=['labelName', 'labelId']) \
-        .add_prefix('bbox_')
-    bbox_df_for_merge['instanceId'] = bbox_df_for_merge['bbox_instanceId']
+        .add_prefix('bbox_') \
+        .rename(columns={'bbox_instanceId': 'instanceId'})
     # NOTE: local bbox3d from perception
     # bbox3d_df_for_merge = bbox3d_df.copy() \
     #     .drop(columns=['labelName', 'labelId']) \
@@ -288,6 +306,7 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     # NOTE: local bbox3d from perception
     # query_df = pd.merge(query_df, bbox3d_df_for_merge, how='inner', left_on='instanceId',
     #                     right_on='instanceId', suffixes=('', '_duplicated'))
+    query_df = query_df.drop(columns=[col for col in query_df.columns if col.endswith('_duplicated')])
     query_df = query_df.rename(columns={'instanceId': 'inst_id'})
 
     # filter out small object
@@ -296,20 +315,16 @@ def frame_to_query_node(f, solo, min_bbox_size=0):
     if len(query_df) <= 1:
         return False, None
 
-    # extract semantic label features
-    embs = {}
-    for _, obj in query_df.iterrows():
-        label_name = obj['label_name']
-        text_features = lavis_feature_extractor.extract_text_features(label_name)
-        for k, v in text_features.items():
-            if k not in embs:
-                embs[k] = []
-            embs[k].append(v)
-    embs = {k: np.vstack(v) for k, v in embs.items()}
+    blip_label_embs = encode_text_features(query_df['label_name'].values, query_df['label_id'].values, 'blipv2')
+    glove_label_embs = encode_text_features(query_df['label_name'].values, query_df['label_id'].values, 'glove')
+    onehot_label_embs = encode_text_features(
+        query_df['label_name'].values, query_df['label_id'].values, 'onehot', n_labels=27)
 
     features = {
-        **{k: np.array(v).reshape(-1, 1) for k, v in query_df.items()},
-        **{f'{k}_embs': v for k, v in embs.items()},
+        **{k: np.asarray(v).reshape(-1, 1) for k, v in query_df.items()},
+        'blip_label_embs': blip_label_embs,
+        'glove_label_embs': glove_label_embs,
+        'onehot_label_embs': onehot_label_embs,
     }
 
     node_ids = query_df.index.to_list()
@@ -392,6 +407,7 @@ if __name__ == '__main__':
 
     GRAPH_PATH = os.path.join(args.path, args.graph_dir)
     lavis_feature_extractor = LAVISFeatureExtractor()
+    glove_feature_extractor = GloveFeatureExtractor('glove/glove.6B.100d.txt')
 
     if not args.skip_graph_gen:
         if os.path.exists(GRAPH_PATH):
@@ -448,7 +464,7 @@ if __name__ == '__main__':
 
         map_graph = pkl.load(open(os.path.join(GRAPH_PATH, map_fname), 'rb'))
         paired_df = pd.DataFrame(columns=['qry_fname', 'map_fname', 'n_overlap'])
-        for qry_fname in tqdm(qry_fnames):
+        for qry_fname in tqdm(qry_fnames, total=len(qry_fnames)):
             qry_graph = pkl.load(open(os.path.join(GRAPH_PATH, qry_fname), 'rb'))
             e1i, _, _, _ = comp_graph_overlap(qry_graph, map_graph)
             n_overlap = len(e1i)

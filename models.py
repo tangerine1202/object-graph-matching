@@ -33,22 +33,53 @@ print(f'torch device: {device}')
 
 
 class Model_2Dto3D(nn.Module):
-    def __init__(self, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+    def __init__(self, emb_dim, text_dim,
+                 qry_edge_type,
+                 map_bbox3d_type, map_edge_type,
+                 sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
         super(Model_2Dto3D, self).__init__()
-        self.emb_dim = emb_dim
-
         # matching (SuperGlue method)
         self.sinkhorn_iters = sinkhorn_iters
         self.match_threshold = match_threshold
         self.bin_score = torch.tensor(bin_score).to(device)
 
-        # NOTE: try share text encoder for qry and map
-        self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, 128, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
-        )
+        self.emb_dim = emb_dim
+        self.text_dim = text_dim
+        self.qry_edge_type = qry_edge_type
+        self.ma_edge_type = map_edge_type
+        self.map_bbox3d_type = map_bbox3d_type
+
+        if qry_edge_type == 'no_dist':
+            self.qry_edge_dim = 2
+        elif qry_edge_type == 'pixel_dist' or qry_edge_type == 'norm_dist':
+            self.qry_edge_dim = 3
+        else:
+            raise NotImplementedError
+
+        if map_edge_type == 'no_dist':
+            self.map_edge_dim = 4
+        elif map_edge_type == 'dist' or map_edge_type == 'norm_dist':
+            self.map_edge_dim = 5
+        else:
+            raise NotImplementedError
+
+        if map_bbox3d_type == 'tqs':
+            self.map_bbox3d_dim = 10
+        elif map_bbox3d_type == 't':
+            self.map_bbox3d_dim = 3
+        else:
+            raise NotImplementedError
+
+        self.n_qry_node_src = 2 + (1 if self.text_dim > 0 else 0)
+        self.n_map_node_src = 1 + (1 if self.text_dim > 0 else 0)
+
+        if self.text_dim > 0:
+            self.txt_encoder = nn.Sequential(
+                nn.Conv1d(text_dim, 64, kernel_size=1, bias=True),
+                nn.InstanceNorm1d(64),
+                nn.ReLU(),
+                nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+            )
 
         # 2D qry
         self.qry_position_encoder = nn.Sequential(
@@ -67,13 +98,13 @@ class Model_2Dto3D(nn.Module):
         )
         self.qry_edge_attr_encoder = nn.Sequential(
             # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(3, 64, kernel_size=1, bias=True),
+            nn.Conv1d(self.qry_edge_dim, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.qry_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+            (GATv2Conv(emb_dim * self.n_qry_node_src, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
@@ -81,21 +112,21 @@ class Model_2Dto3D(nn.Module):
         ])
         # 3D map
         self.map_bbox3d_encoder = nn.Sequential(
-            nn.InstanceNorm1d(10),
-            nn.Conv1d(10, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(self.map_bbox3d_dim),
+            nn.Conv1d(self.map_bbox3d_dim, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.map_edge_attr_encoder = nn.Sequential(
             # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
+            nn.Conv1d(self.map_edge_dim, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.map_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+            (GATv2Conv(emb_dim * self.n_map_node_src, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
@@ -108,32 +139,32 @@ class Model_2Dto3D(nn.Module):
         qry_edge_attr = data_dict['qry_edge_attr']
         qry_node_position = data_dict['qry_node_position']
         qry_node_bbox = data_dict['qry_node_bbox']
-        qry_node_text = data_dict['qry_node_text']
+        if self.text_dim > 0:
+            qry_node_text = data_dict['qry_node_text']
+            qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
 
         qry_edge_attr = self.qry_edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
         qry_node_position = self.qry_position_encoder(qry_node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
         qry_node_bbox = self.qry_bbox_encoder(qry_node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_attr = torch.cat((
-            qry_node_position,
-            qry_node_bbox,
-            qry_node_text
-        ), dim=1)
+
+        qry_node_attr = torch.cat((qry_node_position, qry_node_bbox), dim=1)
+        if self.text_dim > 0:
+            qry_node_attr = torch.cat((qry_node_attr, qry_node_text), dim=1)
         qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
 
         # 3D map
         map_edge_index = data_dict['map_edge_index'].squeeze(0)
         map_edge_attr = data_dict['map_edge_attr']
         map_node_bbox3d = data_dict['map_node_bbox3d']
-        map_node_text = data_dict['map_node_text']
+        if self.text_dim > 0:
+            map_node_text = data_dict['map_node_text']
+            map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
 
         map_edge_attr = self.map_edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
         map_node_bbox3d = self.map_bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_attr = torch.cat((
-            map_node_bbox3d,
-            map_node_text
-        ), dim=1)
+        map_node_attr = map_node_bbox3d
+        if self.text_dim > 0:
+            map_node_attr = torch.cat((map_node_attr, map_node_text), dim=1)
         map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
 
         # concat qry and map nodes
@@ -158,166 +189,52 @@ class Model_2Dto3D(nn.Module):
 
         if not self.training:
             # compute pose
-            pred_pose = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
-            pred_dict['pose'] = pred_pose
+            with torch.no_grad():
+                pred_pose = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
+                pred_dict['pose'] = pred_pose
 
         return pred_dict
 
 
-class Model_2DNode3DEdge_to_3D(nn.Module):
-    def __init__(self, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
-        super(Model_2DNode3DEdge_to_3D, self).__init__()
-        self.emb_dim = emb_dim
-
+class Model_3Dto3D(nn.Module):
+    def __init__(self, emb_dim, text_dim,
+                 qry_edge_type=None,
+                 map_bbox3d_type=None, map_edge_type=None,
+                 sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+        super(Model_3Dto3D, self).__init__()
         # matching (SuperGlue method)
         self.sinkhorn_iters = sinkhorn_iters
         self.match_threshold = match_threshold
         self.bin_score = torch.tensor(bin_score).to(device)
 
-        # NOTE: try share text encoder for qry and map
-        self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, 128, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
-        )
-
-        # 2D qry
-        self.qry_position_encoder = nn.Sequential(
-            nn.InstanceNorm1d(2),
-            nn.Conv1d(2, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.qry_bbox_encoder = nn.Sequential(
-            nn.InstanceNorm1d(5),
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        # 3D edge from depth
-        self.qry_edge_attr_encoder = nn.Sequential(
-            # nn.InstanceNorm1d(5),  # NOTE: do not normalize length
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.qry_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
-        ])
-
-        # 3D map
-        self.map_bbox3d_encoder = nn.Sequential(
-            nn.InstanceNorm1d(10),
-            nn.Conv1d(10, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.map_edge_attr_encoder = nn.Sequential(
-            # nn.InstanceNorm1d(5),  # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.map_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
-        ])
-
-    def forward(self, data_dict):
-        # 2D qry
-        qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
-        qry_edge_attr = data_dict['qry_edge_attr']
-        qry_node_position = data_dict['qry_node_position']
-        qry_node_bbox = data_dict['qry_node_bbox']
-        qry_node_text = data_dict['qry_node_text']
-
-        qry_edge_attr = self.qry_edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_position = self.qry_position_encoder(qry_node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_bbox = self.qry_bbox_encoder(qry_node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_attr = torch.cat((
-            qry_node_position,
-            qry_node_bbox,
-            qry_node_text
-        ), dim=1)
-        qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
-
-        # 3D map
-        map_edge_index = data_dict['map_edge_index'].squeeze(0)
-        map_edge_attr = data_dict['map_edge_attr']
-        map_node_bbox3d = data_dict['map_node_bbox3d']
-        map_node_text = data_dict['map_node_text']
-
-        map_edge_attr = self.map_edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_bbox3d = self.map_bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_attr = torch.cat((
-            map_node_bbox3d,
-            map_node_text
-        ), dim=1)
-        map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
-
-        # concat qry and map nodes
-        node_attr = torch.cat((
-            qry_node_attr,
-            map_node_attr
-        ), dim=1)
-
-        mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
-        mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
-        scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
-        # Get the matches with score above "match_threshold".
-        matches = matches_from_scores(scores, self.match_threshold)
-
-        pred_dict = {
-            'matches0': matches['matches0'],
-            'matches1': matches['matches1'],
-            'matching_scores0': matches['matching_scores0'],
-            'matching_scores1': matches['matching_scores1'],
-            'scores': scores,
-        }
-
-        if not self.training:
-            # compute pose
-            pred_pose_2d = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
-            pred_dict['pose_from_2D'] = pred_pose_2d
-            pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
-            pred_dict['pose_from_3D'] = pred_pose_3d
-
-        return pred_dict
-
-
-class Model_3DNode3DEdge_to_3D(nn.Module):
-    def __init__(self, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
-        super(Model_3DNode3DEdge_to_3D, self).__init__()
         self.emb_dim = emb_dim
+        self.text_dim = text_dim
 
-        # matching (SuperGlue method)
-        self.sinkhorn_iters = sinkhorn_iters
-        self.match_threshold = match_threshold
-        self.bin_score = torch.tensor(bin_score).to(device)
+        if map_edge_type == 'no_dist':
+            self.map_edge_dim = 4
+        elif map_edge_type == 'dist' or map_edge_type == 'norm_dist':
+            self.map_edge_dim = 5
+        else:
+            raise NotImplementedError
 
-        # NOTE: try share text encoder for qry and map
-        self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, 128, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
-        )
-        # 2D qry
+        if map_bbox3d_type == 'tqs':
+            self.map_bbox3d_dim = 10
+        elif map_bbox3d_type == 't':
+            self.map_bbox3d_dim = 3
+        else:
+            raise NotImplementedError
+
+        self.n_qry_node_src = 1 + (1 if self.text_dim > 0 else 0)
+        self.n_map_node_src = 1 + (1 if self.text_dim > 0 else 0)
+
+        if self.text_dim > 0:
+            self.txt_encoder = nn.Sequential(
+                nn.Conv1d(text_dim, 64, kernel_size=1, bias=True),
+                nn.InstanceNorm1d(64),
+                nn.ReLU(),
+                nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+            )
+        # 3D qry
         self.qry_bbox3d_encoder = nn.Sequential(
             nn.InstanceNorm1d(3),
             nn.Conv1d(3, 64, kernel_size=1, bias=True),
@@ -334,7 +251,7 @@ class Model_3DNode3DEdge_to_3D(nn.Module):
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.qry_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+            (GATv2Conv(emb_dim * self.n_qry_node_src, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
@@ -343,21 +260,21 @@ class Model_3DNode3DEdge_to_3D(nn.Module):
 
         # 3D map
         self.map_bbox3d_encoder = nn.Sequential(
-            nn.InstanceNorm1d(10),
-            nn.Conv1d(10, 64, kernel_size=1, bias=True),
+            nn.InstanceNorm1d(self.map_bbox3d_dim),
+            nn.Conv1d(self.map_bbox3d_dim, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.map_edge_attr_encoder = nn.Sequential(
             # nn.InstanceNorm1d(5),  # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
+            nn.Conv1d(self.map_edge_dim, 64, kernel_size=1, bias=True),
             nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
         )
         self.map_layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+            (GATv2Conv(emb_dim * self.n_map_node_src, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
             (nn.ReLU(inplace=True)),
@@ -369,30 +286,30 @@ class Model_3DNode3DEdge_to_3D(nn.Module):
         qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
         qry_edge_attr = data_dict['qry_edge_attr']
         qry_node_bbox3d = data_dict['qry_node_bbox3d']
-        qry_node_text = data_dict['qry_node_text']
+        if self.text_dim > 0:
+            qry_node_text = data_dict['qry_node_text']
+            qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
 
         qry_edge_attr = self.qry_edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
         qry_node_bbox3d = self.qry_bbox3d_encoder(qry_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_attr = torch.cat((
-            qry_node_bbox3d,
-            qry_node_text
-        ), dim=1)
+        qry_node_attr = qry_node_bbox3d
+        if self.text_dim > 0:
+            qry_node_attr = torch.cat((qry_node_attr, qry_node_text), dim=1)
         qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
 
         # 3D map
         map_edge_index = data_dict['map_edge_index'].squeeze(0)
         map_edge_attr = data_dict['map_edge_attr']
         map_node_bbox3d = data_dict['map_node_bbox3d']
-        map_node_text = data_dict['map_node_text']
+        if self.text_dim > 0:
+            map_node_text = data_dict['map_node_text']
+            map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
 
         map_edge_attr = self.map_edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
         map_node_bbox3d = self.map_bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_attr = torch.cat((
-            map_node_bbox3d,
-            map_node_text
-        ), dim=1)
+        map_node_attr = map_node_bbox3d
+        if self.text_dim > 0:
+            map_node_attr = torch.cat((map_node_attr, map_node_text), dim=1)
         map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
 
         # concat qry and map nodes
@@ -417,200 +334,342 @@ class Model_3DNode3DEdge_to_3D(nn.Module):
 
         if not self.training:
             # compute pose
-            pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
-            pred_dict['pose_from_3D'] = pred_pose_3d
+            with torch.no_grad():
+                pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
+                pred_dict['pose_from_3D'] = pred_pose_3d
 
         return pred_dict
 
 
-class Model_3Dto3D(nn.Module):
-    def __init__(self, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
-        super(Model_3Dto3D, self).__init__()
-        self.emb_dim = emb_dim
+# class Model_2DNode3DEdge_to_3D(nn.Module):
+#     def __init__(self, emb_dim, text_dim, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+#         super(Model_2DNode3DEdge_to_3D, self).__init__()
+#         self.emb_dim = emb_dim
+#         self.text_dim = text_dim
 
-        # matching (SuperGlue method)
-        self.sinkhorn_iters = sinkhorn_iters
-        self.match_threshold = match_threshold
-        self.bin_score = torch.tensor(bin_score).to(device)
+#         # matching (SuperGlue method)
+#         self.sinkhorn_iters = sinkhorn_iters
+#         self.match_threshold = match_threshold
+#         self.bin_score = torch.tensor(bin_score).to(device)
 
-        self.txt_encoder = nn.Sequential(
-            # nn.InstanceNorm1d(768),
-            nn.Conv1d(768, 128, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
-        )
-        self.bbox3d_encoder = nn.Sequential(
-            nn.InstanceNorm1d(10),
-            nn.Conv1d(10, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.edge_attr_encoder = nn.Sequential(
-            # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
-        ])
+#         # NOTE: try share text encoder for qry and map
+#         self.txt_encoder = nn.Sequential(
+#             nn.Conv1d(text_dim, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
 
-    def forward(self, data_dict):
-        # 3D qry
-        qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
-        qry_edge_attr = data_dict['qry_edge_attr']
-        qry_node_bbox3d = data_dict['qry_node_bbox3d']
-        qry_node_text = data_dict['qry_node_text']
+#         # 2D qry
+#         self.qry_position_encoder = nn.Sequential(
+#             nn.InstanceNorm1d(2),
+#             nn.Conv1d(2, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.qry_bbox_encoder = nn.Sequential(
+#             nn.InstanceNorm1d(5),
+#             nn.Conv1d(5, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         # 3D edge from depth
+#         self.qry_edge_attr_encoder = nn.Sequential(
+#             # nn.InstanceNorm1d(5),  # NOTE: do not normalize length
+#             nn.Conv1d(5, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.qry_layers = pygnn.Sequential('x, edge_index, edge_attr', [
+#             # TODO: gradient explode when GATv2Conv calculate the softmax with exp
+#             (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (nn.Linear(emb_dim, emb_dim), 'x -> x'),
+#         ])
 
-        qry_edge_attr = self.edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_bbox3d = self.bbox3d_encoder(qry_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        qry_node_attr = torch.cat((
-            qry_node_bbox3d,
-            qry_node_text
-        ), dim=1)
-        qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
+#         # 3D map
+#         self.map_bbox3d_encoder = nn.Sequential(
+#             nn.InstanceNorm1d(10),
+#             nn.Conv1d(10, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.map_edge_attr_encoder = nn.Sequential(
+#             # nn.InstanceNorm1d(5),  # NOTE: do not use InstanceNorm1d for bbox3d
+#             nn.Conv1d(5, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.map_layers = pygnn.Sequential('x, edge_index, edge_attr', [
+#             (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (nn.Linear(emb_dim, emb_dim), 'x -> x'),
+#         ])
 
-        # 3D map
-        map_edge_index = data_dict['map_edge_index'].squeeze(0)
-        map_edge_attr = data_dict['map_edge_attr']
-        map_node_bbox3d = data_dict['map_node_bbox3d']
-        map_node_text = data_dict['map_node_text']
+#     def forward(self, data_dict):
+#         # 2D qry
+#         qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
+#         qry_edge_attr = data_dict['qry_edge_attr']
+#         qry_node_position = data_dict['qry_node_position']
+#         qry_node_bbox = data_dict['qry_node_bbox']
+#         qry_node_text = data_dict['qry_node_text']
 
-        map_edge_attr = self.edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_bbox3d = self.bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        map_node_attr = torch.cat((
-            map_node_bbox3d,
-            map_node_text
-        ), dim=1)
-        map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
+#         qry_edge_attr = self.qry_edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_position = self.qry_position_encoder(qry_node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_bbox = self.qry_bbox_encoder(qry_node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_attr = torch.cat((
+#             qry_node_position,
+#             qry_node_bbox,
+#             qry_node_text
+#         ), dim=1)
+#         qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
 
-        # concat qry and map nodes
-        node_attr = torch.cat((
-            qry_node_attr,
-            map_node_attr
-        ), dim=1)
+#         # 3D map
+#         map_edge_index = data_dict['map_edge_index'].squeeze(0)
+#         map_edge_attr = data_dict['map_edge_attr']
+#         map_node_bbox3d = data_dict['map_node_bbox3d']
+#         map_node_text = data_dict['map_node_text']
 
-        # matching (SuperGlue method)
-        # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
-        mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
-        mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
-        scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
-        # Get the matches with score above "match_threshold".
-        matches = matches_from_scores(scores, self.match_threshold)
+#         map_edge_attr = self.map_edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_bbox3d = self.map_bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_attr = torch.cat((
+#             map_node_bbox3d,
+#             map_node_text
+#         ), dim=1)
+#         map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
 
-        pred_dict = {
-            'matches0': matches['matches0'],
-            'matches1': matches['matches1'],
-            'matching_scores0': matches['matching_scores0'],
-            'matching_scores1': matches['matching_scores1'],
-            'scores': scores,
-        }
+#         # concat qry and map nodes
+#         node_attr = torch.cat((
+#             qry_node_attr,
+#             map_node_attr
+#         ), dim=1)
 
-        if not self.training:
-            # compute pose
-            pred_pose = compute_pose_from_bbox3d(pred_dict, data_dict)
-            pred_dict['pose_from_3D'] = pred_pose
+#         mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
+#         mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
+#         scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
+#         # Get the matches with score above "match_threshold".
+#         matches = matches_from_scores(scores, self.match_threshold)
 
-        return pred_dict
+#         pred_dict = {
+#             'matches0': matches['matches0'],
+#             'matches1': matches['matches1'],
+#             'matching_scores0': matches['matching_scores0'],
+#             'matching_scores1': matches['matching_scores1'],
+#             'scores': scores,
+#         }
+
+#         if not self.training:
+#             # compute pose
+#             with torch.no_grad():
+#                 pred_pose_2d = compute_pose_from_2Dto3D_bbox(pred_dict, data_dict)
+#                 pred_dict['pose_from_2D'] = pred_pose_2d
+#                 pred_pose_3d = compute_pose_from_bbox3d(pred_dict, data_dict)
+#                 pred_dict['pose_from_3D'] = pred_pose_3d
+
+#         return pred_dict
 
 
-class Model_2Dto2D(nn.Module):
-    def __init__(self, emb_dim=64, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
-        super(Model_2Dto2D, self).__init__()
-        self.emb_dim = emb_dim
+# class Model_3Dto3D(nn.Module):
+#     def __init__(self, emb_dim, text_dim, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+#         super(Model_3Dto3D, self).__init__()
+#         self.emb_dim = emb_dim
+#         self.text_dim = text_dim
 
-        # matching (SuperGlue method)
-        self.sinkhorn_iters = sinkhorn_iters
-        self.match_threshold = match_threshold
-        self.bin_score = torch.tensor(bin_score).to(device)
+#         # matching (SuperGlue method)
+#         self.sinkhorn_iters = sinkhorn_iters
+#         self.match_threshold = match_threshold
+#         self.bin_score = torch.tensor(bin_score).to(device)
 
-        self.position_encoder = nn.Sequential(
-            nn.Conv1d(2, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.bbox_encoder = nn.Sequential(
-            nn.Conv1d(5, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.txt_encoder = nn.Sequential(
-            nn.Conv1d(768, 128, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(128),
-            nn.ReLU(),
-            nn.Conv1d(128, emb_dim, kernel_size=1, bias=True),
-        )
-        self.edge_attr_encoder = nn.Sequential(
-            # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
-            nn.Conv1d(3, 64, kernel_size=1, bias=True),
-            nn.InstanceNorm1d(64),
-            nn.ReLU(),
-            nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
-        )
-        self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
-            (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
-            (nn.ReLU(inplace=True)),
-            (nn.Linear(emb_dim, emb_dim), 'x -> x'),
-        ])
+#         self.txt_encoder = nn.Sequential(
+#             nn.Conv1d(text_dim, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.bbox3d_encoder = nn.Sequential(
+#             nn.InstanceNorm1d(10),
+#             nn.Conv1d(10, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.edge_attr_encoder = nn.Sequential(
+#             # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
+#             nn.Conv1d(5, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
+#             (GATv2Conv(emb_dim * 2, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (nn.Linear(emb_dim, emb_dim), 'x -> x'),
+#         ])
 
-    def forward(self, data_dict):
-        edge_index = data_dict['edge_index'].squeeze(0)
-        edge_attr = data_dict['edge_attr']
+#     def forward(self, data_dict):
+#         # 3D qry
+#         qry_edge_index = data_dict['qry_edge_index'].squeeze(0)
+#         qry_edge_attr = data_dict['qry_edge_attr']
+#         qry_node_bbox3d = data_dict['qry_node_bbox3d']
+#         qry_node_text = data_dict['qry_node_text']
 
-        node_position = data_dict['node_position']
-        node_bbox = data_dict['node_bbox']
-        node_text = data_dict['node_text']
+#         qry_edge_attr = self.edge_attr_encoder(qry_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_bbox3d = self.bbox3d_encoder(qry_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_text = self.txt_encoder(qry_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         qry_node_attr = torch.cat((
+#             qry_node_bbox3d,
+#             qry_node_text
+#         ), dim=1)
+#         qry_node_attr = self.qry_layers(qry_node_attr, qry_edge_index, qry_edge_attr).unsqueeze(0)
 
-        node_position = self.position_encoder(node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        node_bbox = self.bbox_encoder(node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        node_text = self.txt_encoder(node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         # 3D map
+#         map_edge_index = data_dict['map_edge_index'].squeeze(0)
+#         map_edge_attr = data_dict['map_edge_attr']
+#         map_node_bbox3d = data_dict['map_node_bbox3d']
+#         map_node_text = data_dict['map_node_text']
 
-        node_attr = torch.cat((
-            node_position,
-            node_bbox,
-            node_text
-        ), dim=1)
+#         map_edge_attr = self.edge_attr_encoder(map_edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_bbox3d = self.bbox3d_encoder(map_node_bbox3d.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_text = self.txt_encoder(map_node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         map_node_attr = torch.cat((
+#             map_node_bbox3d,
+#             map_node_text
+#         ), dim=1)
+#         map_node_attr = self.map_layers(map_node_attr, map_edge_index, map_edge_attr).unsqueeze(0)
 
-        edge_attr = self.edge_attr_encoder(edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
-        # fusion
-        node_attr = self.layers(node_attr, edge_index, edge_attr).unsqueeze(0)
+#         # concat qry and map nodes
+#         node_attr = torch.cat((
+#             qry_node_attr,
+#             map_node_attr
+#         ), dim=1)
 
-        # matching (SuperGlue method)
-        # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
-        mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
-        mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
-        scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
-        # Get the matches with score above "match_threshold".
-        matches = matches_from_scores(scores, self.match_threshold)
+#         # matching (SuperGlue method)
+#         # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
+#         mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
+#         mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
+#         scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
+#         # Get the matches with score above "match_threshold".
+#         matches = matches_from_scores(scores, self.match_threshold)
 
-        pred_dict = {
-            'matches0': matches['matches0'],
-            'matches1': matches['matches1'],
-            'matching_scores0': matches['matching_scores0'],
-            'matching_scores1': matches['matching_scores1'],
-            'scores': scores,
-        }
+#         pred_dict = {
+#             'matches0': matches['matches0'],
+#             'matches1': matches['matches1'],
+#             'matching_scores0': matches['matching_scores0'],
+#             'matching_scores1': matches['matching_scores1'],
+#             'scores': scores,
+#         }
 
-        if not self.training:
-            warnings.warn('2D to 2D pose estimation is not implemented yet')
-            # compute pose
-            # pred_pose = compute_pose_from_bbox2d(pred_dict, data_dict)
-            # pred_dict['pose'] = pred_pose
+#         if not self.training:
+#             # compute pose
+#             with torch.no_grad():
+#                 pred_pose = compute_pose_from_bbox3d(pred_dict, data_dict)
+#                 pred_dict['pose_from_3D'] = pred_pose
 
-        return pred_dict
+#         return pred_dict
+
+
+# class Model_2Dto2D(nn.Module):
+#     def __init__(self, emb_dim, text_dim, sinkhorn_iters=50, match_threshold=0.2, bin_score=1.0):
+#         super(Model_2Dto2D, self).__init__()
+#         self.emb_dim = emb_dim
+#         self.text_dim = text_dim
+
+#         # matching (SuperGlue method)
+#         self.sinkhorn_iters = sinkhorn_iters
+#         self.match_threshold = match_threshold
+#         self.bin_score = torch.tensor(bin_score).to(device)
+
+#         self.txt_encoder = nn.Sequential(
+#             nn.Conv1d(text_dim, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.position_encoder = nn.Sequential(
+#             nn.Conv1d(2, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.bbox_encoder = nn.Sequential(
+#             nn.Conv1d(5, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.edge_attr_encoder = nn.Sequential(
+#             # nn.InstanceNorm1d(edge_attr_dim), # NOTE: do not use InstanceNorm1d for bbox3d
+#             nn.Conv1d(3, 64, kernel_size=1, bias=True),
+#             nn.InstanceNorm1d(64),
+#             nn.ReLU(),
+#             nn.Conv1d(64, emb_dim, kernel_size=1, bias=True),
+#         )
+#         self.layers = pygnn.Sequential('x, edge_index, edge_attr', [
+#             (GATv2Conv(emb_dim * 3, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (GATv2Conv(emb_dim, emb_dim, edge_dim=emb_dim), 'x, edge_index, edge_attr -> x'),
+#             (nn.ReLU(inplace=True)),
+#             (nn.Linear(emb_dim, emb_dim), 'x -> x'),
+#         ])
+
+#     def forward(self, data_dict):
+#         edge_index = data_dict['edge_index'].squeeze(0)
+#         edge_attr = data_dict['edge_attr']
+
+#         node_position = data_dict['node_position']
+#         node_bbox = data_dict['node_bbox']
+#         node_text = data_dict['node_text']
+
+#         node_position = self.position_encoder(node_position.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         node_bbox = self.bbox_encoder(node_bbox.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         node_text = self.txt_encoder(node_text.transpose(1, 2)).transpose(1, 2).squeeze(0)
+
+#         node_attr = torch.cat((
+#             node_position,
+#             node_bbox,
+#             node_text
+#         ), dim=1)
+
+#         edge_attr = self.edge_attr_encoder(edge_attr.transpose(1, 2)).transpose(1, 2).squeeze(0)
+#         # fusion
+#         node_attr = self.layers(node_attr, edge_index, edge_attr).unsqueeze(0)
+
+#         # matching (SuperGlue method)
+#         # ref: https://github.com/magicleap/SuperGluePretrainedNetwork/blob/master/models/superglue.py
+#         mdesc0 = node_attr[:, :data_dict['n1']].transpose(1, 2)
+#         mdesc1 = node_attr[:, data_dict['n1']:].transpose(1, 2)
+#         scores = compute_matches_scores(mdesc0, mdesc1, self.emb_dim, self.sinkhorn_iters, self.bin_score)
+#         # Get the matches with score above "match_threshold".
+#         matches = matches_from_scores(scores, self.match_threshold)
+
+#         pred_dict = {
+#             'matches0': matches['matches0'],
+#             'matches1': matches['matches1'],
+#             'matching_scores0': matches['matching_scores0'],
+#             'matching_scores1': matches['matching_scores1'],
+#             'scores': scores,
+#         }
+
+#         if not self.training:
+#             warnings.warn('2D to 2D pose estimation is not implemented yet')
+#             # compute pose
+#             # pred_pose = compute_pose_from_bbox2d(pred_dict, data_dict)
+#             # pred_dict['pose'] = pred_pose
+
+#         return pred_dict
 
 
 def compute_matches_scores(mdesc0, mdesc1, emb_dim, sinkhorn_iters, bin_score):
@@ -686,21 +745,25 @@ def arange_like(x, dim: int):
 
 
 def compute_pose_from_2Dto3D_bbox(pred_dict, data_dict):
+    # pred_e1i = data_dict['e1i'][0].cpu().numpy()
+    # pred_e2i = data_dict['e2i'][0].cpu().numpy()
     pred_e1i = np.array([idx for idx, v in enumerate(pred_dict['matches0']) if v != -1])
     pred_e2i = np.array([v.item() for idx, v in enumerate(pred_dict['matches0']) if v != -1])
     corrs = np.stack([pred_e1i, pred_e2i], axis=1)  # (n, 2)
     if len(pred_e1i) == 0:
         pred_pose = None
     else:
-        bbox_ccwh = data_dict['qry_node_bbox'][0][corrs[:, 0], :4]
-        bbox3d_world = data_dict['map_node_bbox3d'][0][corrs[:, 1]]
-        K = data_dict['qry_camera_intrinsics'][0]
+        bbox_ccwh = data_dict['qry_node_bbox']
+        bbox3d_world = data_dict['map_node_bbox3d']
+        K = data_dict['qry_camera_intrinsics']
         if isinstance(bbox_ccwh, torch.Tensor):
-            bbox_ccwh = bbox_ccwh.cpu().numpy()
+            bbox_ccwh = bbox_ccwh[0].cpu().numpy()
         if isinstance(bbox3d_world, torch.Tensor):
-            bbox3d_world = bbox3d_world.cpu().numpy()
+            bbox3d_world = bbox3d_world[0].cpu().numpy()
         if isinstance(K, torch.Tensor):
-            K = K.cpu().numpy()
+            K = K[0].cpu().numpy()
+        bbox_ccwh = bbox_ccwh[corrs[:, 0], :4]
+        bbox3d_world = bbox3d_world[corrs[:, 1]]
         pts3d = bbox3d_world[:, :3]  # bbox3d center
         pts2d = bbox_ccwh[:, :2]  # bbox2d center
         if pts3d.shape[0] > 3:
@@ -708,7 +771,11 @@ def compute_pose_from_2Dto3D_bbox(pred_dict, data_dict):
         else:
             R_wc_init, t_wc_init = scipy_R.from_matrix(np.eye(3)), np.zeros(3)
         pose_init = np.concatenate([t_wc_init, R_wc_init.as_quat()])
-        R_wc_refine, t_wc_refine = pose_by_minimize_bbox3d_projection(bbox3d_world, bbox_ccwh, K, pose_init=pose_init)
+        if bbox3d_world.shape[1] > 3:
+            R_wc_refine, t_wc_refine = pose_by_minimize_bbox3d_projection(
+                bbox3d_world, bbox_ccwh, K, pose_init=pose_init)
+        else:
+            R_wc_refine, t_wc_refine = R_wc_init, t_wc_init
         # combine with the initial pose
         pred_pose = np.concatenate([t_wc_refine, R_wc_refine.as_quat()])
     return pred_pose
@@ -795,10 +862,12 @@ def compute_pose_from_bbox3d(pred_dict, data_dict):
     if len(pred_e1i) == 0:
         pred_pose = None
     else:
+        bbox3d_t1 = data_dict['qry_node_bbox3d']
+        bbox3d_t2 = data_dict['map_node_bbox3d']
         if isinstance(data_dict['qry_node_bbox3d'], torch.Tensor):
-            bbox3d_t1 = data_dict['qry_node_bbox3d'][0].cpu().numpy()
+            bbox3d_t1 = bbox3d_t1[0].cpu().numpy()
         if isinstance(data_dict['map_node_bbox3d'], torch.Tensor):
-            bbox3d_t2 = data_dict['map_node_bbox3d'][0].cpu().numpy()
+            bbox3d_t2 = bbox3d_t2[0].cpu().numpy()
         bbox3d_t1 = bbox3d_t1[:, :3]
         bbox3d_t2 = bbox3d_t2[:, :3]
         pred_R, pred_t = pose_by_ICP_with_corrs_init(bbox3d_t1, bbox3d_t2, corrs)

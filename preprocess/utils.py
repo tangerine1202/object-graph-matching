@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 import PIL.Image as Image
+from tqdm.auto import tqdm
 from lavis.models import load_model_and_preprocess
 import torch
 
@@ -13,10 +14,52 @@ else:
     device = 'cpu'
 
 
-# LAVIS Unified Feature Extraction Interface
+class GloveFeatureExtractor:
+    def __init__(self, glove_fpath):
+        df = pd.read_csv(glove_fpath, sep=" ", quoting=3, header=None, index_col=0)
+        self.glove = {k: v.values for k, v in tqdm(df.T.items(), total=df.shape[1], desc='load glove')}
+        self.fix_dict = {
+            'filebox': 'folder',
+            'tablelamp': 'lamp',
+            'officephone': 'telephone',
+            'nightstand': 'bedside',
+            'refridgerator': 'refrigerator',
+            'showercurtain': 'curtain',
+            'floormat': 'mat',
+            'otherprop': 'prop',
+            'otherfurniture': 'furniture',
+            'otherstructure': 'structure',
+            "trafficlight": "signal",
+            "firehydrant": "hydrant",
+            "stopsign": "stop",
+            "parkingmeter": "meter",
+            "sportsball": "ball",
+            "baseballbat": "bat",
+            "baseballglove": "glove",
+            "tennisracket": "racket",
+            "wineglass": "glass",
+            "pottedplant": "plant",
+            "diningtable": "table",
+            "teddybear": "bear",
+            "hairdrier": "dryer",
+        }
+
+    def extract_feature(self, word):
+        word = word.lower()
+        if word not in self.glove:
+            word = word.replace(' ', '')
+        if word not in self.glove:
+            word = self.fix_dict[word]
+        if word not in self.glove:
+            raise ValueError(f'word "{word}" not in glove')
+        return self.glove[word]
+
+    def __call__(self, word):
+        return self.extract_feature(word)
 
 
 class LAVISFeatureExtractor:
+    # LAVIS Unified Feature Extraction Interface
     def __init__(self):
         model, vis_processors, txt_processors = load_model_and_preprocess(
             name="blip2_feature_extractor", model_type="pretrain", is_eval=True, device=device)
@@ -94,6 +137,8 @@ def comp_bbox2d_edge_with_min_knn(df, cxcy_cols, node_ids, k=3):
     if k > 0:
         pivot = edge_attr.pivot(index='dst', columns='src', values='bbox2d_dist')
         knn_dist = pivot.apply(lambda x: x.nsmallest(k).index)
+        if isinstance(knn_dist, pd.Series):
+            knn_dist = knn_dist.to_frame()
         edge_index = knn_dist.melt().rename(columns={'variable': 'src', 'value': 'dst'})
         edge_attr = edge_attr.merge(edge_index, on=['src', 'dst'])
 
@@ -140,6 +185,8 @@ def comp_bbox3d_edge_with_min_knn(df, xyz_cols, node_ids, k=3):
     if k > 0:
         pivot = edge_attr.pivot(index='dst', columns='src', values='bbox3d_dist')
         knn_dist = pivot.apply(lambda x: x.nsmallest(k).index)
+        if isinstance(knn_dist, pd.Series):
+            knn_dist = knn_dist.to_frame()
         edge_index = knn_dist.melt().rename(columns={'variable': 'src', 'value': 'dst'})
         edge_attr = edge_attr.merge(edge_index, on=['src', 'dst'])
 
@@ -160,7 +207,9 @@ def comp_bbox3d_dist_and_quat(bbox3d_df, xyz_cols):
     # quaternion
     axis = np.cross(cross_df[[f'{col}_src' for col in xyz_cols]].values,
                     cross_df[[f'{col}_dst' for col in xyz_cols]].values)  # (n*n, 3)
-    axis /= np.linalg.norm(axis, axis=1, keepdims=True)  # (n*n, 3)
+    norms = np.linalg.norm(axis, axis=1, keepdims=True)
+    valid_norms = (norms > 0).flatten()
+    axis[valid_norms] /= norms[valid_norms]  # (n*n, 3)
     cos_theta = np.sum(cross_df[[f'{col}_src' for col in xyz_cols]].values *
                        cross_df[[f'{col}_dst' for col in xyz_cols]].values, axis=1)  # (n*n, )
     cos_theta /= np.linalg.norm(cross_df[[f'{col}_src' for col in xyz_cols]].values, axis=1) * \

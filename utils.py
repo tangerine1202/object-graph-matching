@@ -1,9 +1,20 @@
 import warnings
 from itertools import combinations
 import numpy as np
+import cv2
 import open3d as o3d
 from scipy.spatial.transform import Rotation as scipy_R
 from scipy.optimize import minimize as scipy_minimize
+
+
+def read_scannet_img(scene_id, frame_id, scannet_path='data/ScanNet/scannet_by_tr3d_with_DepthImage'):
+    img_path = f'{scannet_path}/posed_images/{scene_id}/{frame_id}.jpg'
+    img = cv2.cvtColor(cv2.imread(img_path), cv2.COLOR_BGR2RGB)
+    return img
+
+
+def data_dict_to_device(data_dict, device):
+    return {k: v.to(device) for k, v in data_dict.items()}
 
 
 def invert_Rt(R, t):
@@ -12,6 +23,16 @@ def invert_Rt(R, t):
     R_inv = R.inv()
     t_inv = -(R_inv.apply(t))
     return R_inv, t_inv
+
+
+def adjust_intrinsics_with_img_size(K, orig_img_size, img_size):
+    # Calculate scale factors
+    s = np.array(img_size) / np.array(orig_img_size)
+    # Scale the intrinsic parameters
+    K_new = K.copy()
+    K_new[0, :] *= s[0]
+    K_new[1, :] *= s[1]
+    return K_new
 
 # ----- Graph -----
 
@@ -70,7 +91,11 @@ def project_bbox3d_to_2d_xyxy(bbox3d, K):
     bbox = np.zeros((N, 4))
     corners = corners_of_bbox3d(bbox3d)
     for i in range(N):
-        corners_h = (corners[i] @ K.T)
+        corners_h = corners[i] @ K.T
+        in_view_mask = (corners_h[:, 2:] > 0).flatten()
+        if sum(in_view_mask) == 0:
+            bbox[i] = np.array([-1, -1, -1, -1])
+            continue
         corners_h = corners_h[:, :2] / corners_h[:, 2:]
         bbox[i] = np.array([
             corners_h[:, 0].min(),
@@ -102,3 +127,18 @@ def compute_union_area(xyxy_a, xyxy_b):
     area_intersect = compute_intersect_area(xyxy_a, xyxy_b)
     area_union = area_a + area_b - area_intersect
     return area_union
+
+
+def compute_IoU_x0y0wh(xywh_a, xywh_b):
+    xyxy_a = xywh_a.copy()
+    xyxy_a[2:] += xyxy_a[:2]
+    xyxy_b = xywh_b.copy()
+    xyxy_b[2:] += xyxy_b[:2]
+    return compute_IoU_xyxy(xyxy_a, xyxy_b)
+
+
+def compute_IoU_xyxy(xyxy_a, xyxy_b):
+    area_intersect = compute_intersect_area(xyxy_a, xyxy_b)
+    area_union = compute_union_area(xyxy_a, xyxy_b)
+    iou = area_intersect / area_union
+    return iou
